@@ -11,12 +11,19 @@ class ProcessingState(TypedDict):
     # Populated by parse node
     raw_text: str
     page_texts: list[dict]  # [{"page": int, "text": str}]
+    # Populated by extract_structure node (Python, no LLM)
+    extracted_toc: list[dict]          # [{"title", "level", "page"}]
+    extracted_tables: list[dict]       # [{"page", "rows", "caption", "row_count", "col_count"}]
+    extracted_equations: list[dict]    # [{"content", "type", "context", "char_offset"}]
+    extracted_definitions: list[dict]  # [{"term", "definition", "type"}]
+    section_boundaries: list[dict]    # [{"title", "start_char", "end_char", "page"}]
+    doc_metadata: dict                # {"title", "author", "total_pages"}
     # Populated by outline node
-    outline: list[dict]  # [{"title": str, "level": int, "page_start": int, "snippet": str}]
+    outline: list[dict]  # [{"title", "level", "page_start", "snippet"}]
     # Populated by plan node
-    note_plan: list[dict]  # [{"title": str, "parent_title": str|None, "tags": list, ...}]
+    note_plan: list[dict]
     existing_tags: list[str]
-    existing_note_titles: list[str]  # for link insertion
+    existing_note_titles: list[str]
     # Populated by create_notes node
     created_notes: list[dict]
     # Populated by index_gen node

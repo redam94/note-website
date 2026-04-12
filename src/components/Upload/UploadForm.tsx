@@ -15,7 +15,8 @@ interface DocStatus {
 const PIPELINE_STAGES = [
   { key: "upload", label: "Upload" },
   { key: "parse", label: "Parse document" },
-  { key: "outline", label: "Detect structure" },
+  { key: "extract", label: "Extract structure" },
+  { key: "outline", label: "Build outline" },
   { key: "plan", label: "Plan notes" },
   { key: "create", label: "Create notes" },
   { key: "index", label: "Generate indexes" },
@@ -30,12 +31,13 @@ function stageFromStep(step: string | null, status: string): number {
   if (!step) return 0;
   const s = step.toLowerCase();
   if (s.includes("parsing") || s.includes("parsed")) return 1;
-  if (s.includes("detecting") || s.includes("found") && s.includes("section")) return 2;
-  if (s.includes("planning") || s.includes("planned")) return 3;
-  if (s.includes("creating note")) return 4;
-  if (s.includes("generating index")) return 5;
-  if (s.includes("inserting wiki")) return 6;
-  if (s.includes("cross-link") || s.includes("detecting cross")) return 7;
+  if (s.includes("extracting") || s.includes("structure extracted")) return 2;
+  if (s.includes("using extracted") || s.includes("outline")) return 3;
+  if (s.includes("planning") || s.includes("planned")) return 4;
+  if (s.includes("creating note")) return 5;
+  if (s.includes("generating index")) return 6;
+  if (s.includes("inserting wiki") || s.includes("inserting link")) return 7;
+  if (s.includes("cross-link") || s.includes("detecting cross") || s.includes("classifying")) return 8;
   return 1; // default to parse if processing
 }
 
@@ -112,6 +114,7 @@ export default function UploadForm() {
             if (current.status === "done") {
               if (pollRef.current) clearInterval(pollRef.current);
               setUploading(false);
+              window.dispatchEvent(new Event("sidebar-refresh"));
               setTimeout(() => router.push("/"), 2500);
             } else if (current.status === "error") {
               if (pollRef.current) clearInterval(pollRef.current);

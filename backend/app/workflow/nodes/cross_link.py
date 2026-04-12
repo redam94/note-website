@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -15,25 +16,11 @@ from ..state import ProcessingState
 CANDIDATE_SYSTEM = load_prompt("cross_link_candidates").format()
 CLASSIFY_SYSTEM = load_prompt("cross_link_classify").format()
 
-_CANDIDATE_SYSTEM_LEGACY = (
-    "You are a knowledge graph analyst. Given a list of note titles and summaries,\n"
-    "identify pairs that are likely semantically related.\n"
-    "Return ONLY valid JSON array of pairs:\n"
-    '[{"note_a_id": 1, "note_b_id": 2}]\n'
-    "Only include pairs that have a meaningful relationship. Be selective."
-)
-
-_CLASSIFY_SYSTEM_LEGACY = (
-    "You are a knowledge graph analyst. Given two notes, classify their relationship.\n"
-    "Relationship types: supports, contradicts, defines, example_of, part_of, references\n"
-    "Return ONLY valid JSON:\n"
-    '{"relationship": "...", "confidence": 0.0-1.0}\n'
-    "If not meaningfully related, return: {\"relationship\": null}"
-)
+_CONCURRENCY = 6  # Classification calls are small (256 tokens), can run more
 
 
 async def detect_cross_links(state: ProcessingState) -> ProcessingState:
-    """Detect cross-links between new and existing notes."""
+    """Detect cross-links: candidate detection (serial), classification (parallel)."""
     created_notes = state["created_notes"]
     await set_step(state["document_id"], "Detecting cross-links between notes...")
 
@@ -44,25 +31,21 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
-
-        # Get all notes
         result = await db.execute(select(Note))
         all_notes = result.scalars().all()
 
     existing_notes = [n for n in all_notes if n.id not in new_ids]
     new_notes = [n for n in all_notes if n.id in new_ids]
 
+    # ── Phase 1: Identify candidate pairs ────────────────────────────
     if not existing_notes:
-        # Only detect links among new notes
         candidates = []
         for i, a in enumerate(new_notes):
-            for b in new_notes[i + 1 :]:
-                # Skip parent-child pairs
+            for b in new_notes[i + 1:]:
                 if a.parent_id == b.id or b.parent_id == a.id:
                     continue
                 candidates.append((a, b))
     else:
-        # Use simple model to find candidates between new and existing
         note_summaries = []
         for n in new_notes + existing_notes[:50]:
             summary = getattr(n, "summary", None) or n.content[:150]
@@ -84,10 +67,7 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
                 tier="simple",
             )
             json_match = re.search(r"\[.*\]", response, re.DOTALL)
-            if json_match:
-                candidate_pairs = json.loads(json_match.group())
-            else:
-                candidate_pairs = json.loads(response)
+            candidate_pairs = json.loads(json_match.group()) if json_match else json.loads(response)
         except (json.JSONDecodeError, Exception):
             candidate_pairs = []
 
@@ -99,39 +79,54 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
             if a_id in note_map and b_id in note_map:
                 candidates.append((note_map[a_id], note_map[b_id]))
 
-    # Classify each candidate pair
-    cross_links = []
-    for note_a, note_b in candidates[:30]:  # Limit to 30 pairs
-        prompt = (
-            f'Note A: "{note_a.title}"\n{note_a.content[:500]}\n\n'
-            f'Note B: "{note_b.title}"\n{note_b.content[:500]}'
-        )
+    # ── Phase 2: Classify all pairs in parallel ──────────────────────
+    pairs_to_classify = candidates[:30]
+    if not pairs_to_classify:
+        return {**state, "cross_links": []}
 
-        try:
-            response = await provider.complete(
-                messages=[{"role": "user", "content": prompt}],
-                system=CLASSIFY_SYSTEM,
-                max_tokens=256,
-                tier="simple",
+    await set_step(
+        state["document_id"],
+        f"Classifying {len(pairs_to_classify)} cross-link pairs...",
+    )
+
+    sem = asyncio.Semaphore(_CONCURRENCY)
+
+    async def _classify_one(note_a, note_b) -> dict | None:
+        async with sem:
+            prompt = (
+                f'Note A: "{note_a.title}"\n{note_a.content[:500]}\n\n'
+                f'Note B: "{note_b.title}"\n{note_b.content[:500]}'
             )
-            result = json.loads(response)
-            if result.get("relationship"):
-                cross_links.append(
-                    {
+            try:
+                response = await provider.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    system=CLASSIFY_SYSTEM,
+                    max_tokens=256,
+                    tier="simple",
+                )
+                result = json.loads(response)
+                if result.get("relationship"):
+                    return {
                         "source_id": note_a.id,
                         "target_id": note_b.id,
                         "relationship": result["relationship"],
                         "confidence": result.get("confidence", 0.5),
                     }
-                )
-        except (json.JSONDecodeError, Exception):
-            continue
+            except (json.JSONDecodeError, Exception):
+                pass
+            return None
 
-    # Insert edges into DB
+    results = await asyncio.gather(
+        *[_classify_one(a, b) for a, b in pairs_to_classify],
+        return_exceptions=True,
+    )
+
+    cross_links = [r for r in results if r is not None and not isinstance(r, BaseException)]
+
+    # ── Phase 3: Batch insert edges ──────────────────────────────────
     now = datetime.now(timezone.utc).isoformat()
     async with async_session() as db:
         for link in cross_links:
-            # Check for duplicates
             existing = await db.execute(
                 select(GraphEdge).where(
                     and_(

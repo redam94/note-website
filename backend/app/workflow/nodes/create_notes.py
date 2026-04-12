@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -16,51 +18,127 @@ from ..state import ProcessingState
 
 NOTE_SYSTEM = load_prompt("create_note").format()
 
-_NOTE_SYSTEM_LEGACY = """\
-You are a knowledge extraction expert creating notes for an Obsidian-style knowledge base.
+_CONCURRENCY = 6
+_MIN_QUALITY_CHARS = 500  # minimum body length to accept without escalation
 
-Each note MUST follow this exact format:
-
-1. Start with a `> [!summary]` callout (2-3 sentences capturing the key point)
-2. An `## Overview` section providing context
-3. `## Main Content` with detailed subsections using `###` and `####`
-4. Use Obsidian-style callouts for special content:
-   - `> [!definition] Definition Name` for formal definitions
-   - `> [!theorem] Theorem Name` for mathematical theorems/propositions
-   - `> [!example] Example Title` for concrete examples
-   - `> [!important]` for critical insights
-   - `> [!warning]` for caveats and edge cases
-5. Use LaTeX math: inline `$...$` and display `$$...$$` with `\\tag{}` for numbered equations
-6. End with a `## See Also` section listing related topics as bullet points
-
-Rules:
-- The note must be SELF-CONTAINED — understandable without the source document
-- Focus on ONE topic with rich, specific detail
-- Use markdown headers, bold, bullet points for structure
-- Include specific formulas, parameters, and examples from the source text
-- Write in an academic but accessible style
-
-Return ONLY valid JSON:
-{"summary": "2-3 sentence summary for the [!summary] callout", "content": "Full markdown content (everything AFTER the H1 title, starting with the [!summary] callout)"}
-"""
+logger = logging.getLogger(__name__)
 
 
-def _get_section_text(page_texts: list[dict], page: int, max_chars: int = 5000) -> str:
-    """Extract text around the given page number."""
-    if not page_texts:
-        return ""
-    start_idx = max(0, page - 2)
-    end_idx = min(len(page_texts), page + 2)
-    parts = []
-    total = 0
-    for pt in page_texts[start_idx:end_idx]:
-        text = pt["text"]
-        if total + len(text) > max_chars:
-            parts.append(text[: max_chars - total])
-            break
-        parts.append(text)
-        total += len(text)
-    return "\n".join(parts)
+# ── Source text extraction (boundary-aware) ───────────────────────────
+
+
+def _get_section_text(
+    raw_text: str,
+    page_texts: list[dict],
+    page: int,
+    outline: list[dict] | None = None,
+    chapter: str | None = None,
+    section_boundaries: list[dict] | None = None,
+    extracted_tables: list[dict] | None = None,
+    extracted_equations: list[dict] | None = None,
+    max_chars: int = 10_000,
+) -> str:
+    """Extract source text for a note using the best available method.
+
+    Priority: char offsets > outline page ranges > page ± window.
+    Appends relevant tables and equations if available.
+    """
+    main_text = ""
+
+    # Method 1: Character offsets from section_boundaries (most precise)
+    if section_boundaries and chapter:
+        chapter_lower = chapter.lower().strip()
+        for b in section_boundaries:
+            if b["title"].lower().strip() == chapter_lower or chapter_lower in b["title"].lower():
+                main_text = raw_text[b["start_char"]:b["end_char"]][:max_chars]
+                break
+
+    # Method 2: Outline page ranges
+    if not main_text and outline and page_texts:
+        matched_idx = None
+        if chapter:
+            chapter_lower = chapter.lower().strip()
+            for i, entry in enumerate(outline):
+                etitle = entry.get("title", "").lower().strip()
+                if etitle == chapter_lower or chapter_lower in etitle or etitle in chapter_lower:
+                    matched_idx = i
+                    break
+        if matched_idx is None:
+            best_dist = 999
+            for i, entry in enumerate(outline):
+                dist = abs(entry.get("page_start", 1) - page)
+                if dist < best_dist:
+                    best_dist = dist
+                    matched_idx = i
+
+        if matched_idx is not None:
+            start_page = outline[matched_idx].get("page_start", page)
+            end_page = (
+                outline[matched_idx + 1].get("page_start", start_page + 3)
+                if matched_idx + 1 < len(outline)
+                else len(page_texts)
+            )
+            parts = []
+            total = 0
+            for pt in page_texts[max(0, start_page - 1):min(len(page_texts), end_page)]:
+                if total + len(pt["text"]) > max_chars:
+                    parts.append(pt["text"][: max_chars - total])
+                    break
+                parts.append(pt["text"])
+                total += len(pt["text"])
+            main_text = "\n".join(parts)
+
+    # Method 3: Page window fallback
+    if not main_text and page_texts:
+        parts = []
+        total = 0
+        for pt in page_texts[max(0, page - 2):min(len(page_texts), page + 2)]:
+            if total + len(pt["text"]) > max_chars:
+                parts.append(pt["text"][: max_chars - total])
+                break
+            parts.append(pt["text"])
+            total += len(pt["text"])
+        main_text = "\n".join(parts)
+
+    # Append extracted tables for this section's page range
+    if extracted_tables:
+        relevant_tables = [t for t in extracted_tables if abs(t.get("page", 0) - page) <= 2]
+        if relevant_tables:
+            table_text = "\n\n--- Extracted Tables ---\n"
+            for t in relevant_tables[:3]:
+                rows = t.get("rows", [])
+                if rows:
+                    header = " | ".join(str(c) for c in rows[0])
+                    sep = " | ".join("---" for _ in rows[0])
+                    body = "\n".join(" | ".join(str(c) for c in row) for row in rows[1:8])
+                    table_text += f"\n| {header} |\n| {sep} |\n| {body} |\n"
+            main_text += table_text
+
+    # Append relevant display equations
+    if extracted_equations:
+        # Find equations near this page's char range
+        display_eqs = [e for e in extracted_equations if e.get("type") == "display"]
+        if section_boundaries and chapter:
+            for b in section_boundaries:
+                if chapter.lower() in b["title"].lower():
+                    display_eqs = [
+                        e for e in display_eqs
+                        if b["start_char"] <= e.get("char_offset", 0) <= b["end_char"]
+                    ]
+                    break
+
+        if display_eqs:
+            eq_text = "\n\n--- Key Equations ---\n"
+            for eq in display_eqs[:5]:
+                eq_text += f"\n$$\n{eq['content']}\n$$\n"
+                if eq.get("context"):
+                    eq_text += f"Context: {eq['context']}\n"
+            main_text += eq_text
+
+    return main_text
+
+
+# ── Frontmatter builder ──────────────────────────────────────────────
 
 
 def _build_frontmatter(
@@ -74,7 +152,6 @@ def _build_frontmatter(
     used_by: list[str],
     doc_type: str = "concept",
 ) -> str:
-    """Build YAML frontmatter matching the second-brain format."""
     lines = ["---"]
     lines.append(f'title: "{title}"')
     lines.append("tags:")
@@ -103,81 +180,202 @@ def _build_frontmatter(
     return "\n".join(lines)
 
 
+# ── Quality check ────────────────────────────────────────────────────
+
+
+def _is_stub(note_data: dict) -> bool:
+    """Check if the generated note is too shallow to accept."""
+    content = note_data.get("content", "")
+    if len(content) < _MIN_QUALITY_CHARS:
+        return True
+    if "Content extracted from" in content and content.count("##") <= 2:
+        return True
+    # Check it has at least Overview + one more section
+    headings = re.findall(r"^##\s+", content, re.MULTILINE)
+    if len(headings) < 2:
+        return True
+    return False
+
+
+def _parse_llm_response(response: str) -> dict | None:
+    """Try to parse the LLM response as JSON with summary+content."""
+    try:
+        json_match = re.search(r"\{.*\}", response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+        else:
+            data = json.loads(response)
+        if "content" in data:
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+# ── Main node ─────────────────────────────────────────────────────────
+
+
 async def create_notes(state: ProcessingState) -> ProcessingState:
-    """Create notes based on the plan, in Obsidian second-brain format."""
+    """Create notes with Haiku-first, Sonnet-escalation strategy."""
     note_plan = state["note_plan"]
     page_texts = state["page_texts"]
     original_name = state["original_name"]
     document_id = state["document_id"]
+    outline = state.get("outline", [])
 
     async with async_session() as db:
         provider = await get_provider(db)
         result = await db.execute(select(Note.slug))
         existing_slugs = set(result.scalars().all())
 
-    created_notes = []
-    slug_map: dict[str, int] = {}  # title -> note_id
     title_list = [p["title"] for p in note_plan]
-
+    existing_titles = state.get("existing_note_titles", [])
+    all_linkable = list(set(title_list + existing_titles))[:50]
     total_planned = len(note_plan)
-    for note_idx, plan_entry in enumerate(note_plan):
-        await set_step(
-            document_id,
-            f"Creating note {note_idx + 1}/{total_planned}: {plan_entry['title'][:50]}",
-            notes_count=note_idx,
-        )
-        page = plan_entry.get("page", 1)
-        section_text = _get_section_text(page_texts, page)
 
-        # Build context about sibling and existing notes for cross-referencing
-        sibling_titles = [t for t in title_list if t != plan_entry["title"]]
-        existing_titles = state.get("existing_note_titles", [])
-        all_linkable = list(set(sibling_titles + existing_titles))[:40]
+    await set_step(document_id, f"Creating {total_planned} notes...", notes_count=0)
 
-        depends_str = ", ".join(plan_entry.get("depends_on", [])[:5])
-        used_by_str = ", ".join(plan_entry.get("used_by", [])[:5])
+    sem = asyncio.Semaphore(_CONCURRENCY)
+    completed = 0
 
-        prompt = (
-            f"Document: {original_name}\n"
-            f"Topic: {plan_entry['title']}\n"
-            f"Folder: {plan_entry.get('folder', '')}\n"
-            f"Scope: {plan_entry.get('scope', 'General coverage')}\n"
-            f"Chapter/Section: {plan_entry.get('chapter', 'N/A')}\n"
-            f"Page: {page}\n"
-            f"Depends on: {depends_str or 'none'}\n"
-            f"Used by: {used_by_str or 'none'}\n\n"
-            f"Available notes to link to with [[Note Title]]:\n"
-            + "\n".join(f"- {t}" for t in all_linkable)
-            + f"\n\nSource text from document:\n{section_text}\n\n"
-            "Create a detailed note. Use [!definition], [!theorem], [!example] callouts "
-            "with ^block-ids. Include LaTeX math. Cross-link to existing notes with [[wiki-links]]. "
-            "Display math must have $$ on its own line."
-        )
+    async def _generate_one(idx: int, plan_entry: dict) -> tuple[int, dict, dict]:
+        nonlocal completed
+        async with sem:
+            page = plan_entry.get("page", 1)
+            chapter = plan_entry.get("chapter")
 
-        try:
-            response = await provider.complete(
-                messages=[{"role": "user", "content": prompt}],
-                system=NOTE_SYSTEM,
-                max_tokens=4096,
-                tier="advanced",
+            # Get source text using outline for precise extraction
+            section_text = _get_section_text(
+                raw_text=state["raw_text"],
+                page_texts=page_texts,
+                page=page,
+                outline=outline,
+                chapter=chapter,
+                section_boundaries=state.get("section_boundaries"),
+                extracted_tables=state.get("extracted_tables"),
+                extracted_equations=state.get("extracted_equations"),
+                max_chars=10_000,
             )
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                note_data = json.loads(json_match.group())
-            else:
-                note_data = json.loads(response)
-        except (json.JSONDecodeError, Exception):
-            note_data = {
-                "summary": f"Note about {plan_entry['title']}",
-                "content": (
-                    f"> [!summary]\n"
-                    f"> Note about {plan_entry['title']} from {original_name}.\n\n"
-                    f"## Overview\n\nContent extracted from {original_name}.\n\n"
-                    f"## See Also\n"
-                ),
-            }
 
-        # Generate unique slug
+            linkable = [t for t in all_linkable if t != plan_entry["title"]]
+            depends_str = ", ".join(plan_entry.get("depends_on", [])[:5])
+            used_by_str = ", ".join(plan_entry.get("used_by", [])[:5])
+
+            base_prompt = (
+                f"Document: {original_name}\n"
+                f"Topic: {plan_entry['title']}\n"
+                f"Folder: {plan_entry.get('folder', '')}\n"
+                f"Scope: {plan_entry.get('scope', 'General coverage')}\n"
+                f"Chapter/Section: {chapter or 'N/A'}\n"
+                f"Page: {page}\n"
+                f"Depends on: {depends_str or 'none'}\n"
+                f"Used by: {used_by_str or 'none'}\n\n"
+                f"Available notes to link to with [[Note Title]]:\n"
+                + "\n".join(f"- {t}" for t in linkable[:40])
+                + f"\n\nSource text from document:\n{section_text}\n\n"
+                "Create a detailed, substantive note. Use [!definition], [!theorem], "
+                "[!example] callouts with ^block-ids. Include LaTeX math. "
+                "Cross-link to existing notes with [[wiki-links]]. "
+                "Display math must have $$ on its own line."
+            )
+
+            # ── Phase 1: Try Haiku first ─────────────────────────────
+            note_data = None
+            try:
+                response = await provider.complete(
+                    messages=[{"role": "user", "content": base_prompt}],
+                    system=NOTE_SYSTEM,
+                    max_tokens=4096,
+                    tier="simple",
+                )
+                note_data = _parse_llm_response(response)
+            except Exception as e:
+                logger.debug("Haiku failed for %s: %s", plan_entry["title"], e)
+
+            # ── Phase 2: Escalate to Sonnet if Haiku produced a stub ──
+            if note_data is None or _is_stub(note_data):
+                haiku_draft = note_data.get("content", "") if note_data else ""
+
+                # Get more source text for the retry
+                expanded_text = _get_section_text(
+                    raw_text=state["raw_text"],
+                    page_texts=page_texts,
+                    page=page,
+                    outline=outline,
+                    chapter=chapter,
+                    section_boundaries=state.get("section_boundaries"),
+                    extracted_tables=state.get("extracted_tables"),
+                    extracted_equations=state.get("extracted_equations"),
+                    max_chars=15_000,
+                )
+
+                escalation_prompt = base_prompt.replace(section_text, expanded_text)
+                if haiku_draft:
+                    escalation_prompt += (
+                        f"\n\nA previous attempt produced this insufficient draft "
+                        f"(too brief or missing sections). Rewrite with much more detail, "
+                        f"specific formulas, examples, and explanations:\n\n{haiku_draft[:2000]}"
+                    )
+
+                try:
+                    response = await provider.complete(
+                        messages=[{"role": "user", "content": escalation_prompt}],
+                        system=NOTE_SYSTEM,
+                        max_tokens=4096,
+                        tier="advanced",
+                    )
+                    sonnet_data = _parse_llm_response(response)
+                    if sonnet_data and not _is_stub(sonnet_data):
+                        note_data = sonnet_data
+                except Exception as e:
+                    logger.debug("Sonnet escalation failed for %s: %s", plan_entry["title"], e)
+
+            # ── Fallback: embed real source text ──────────────────────
+            if note_data is None or _is_stub(note_data):
+                # Include actual source material instead of empty stub
+                source_excerpt = section_text[:4000].strip()
+                note_data = {
+                    "summary": f"Key concepts from {plan_entry['title']} in {original_name}.",
+                    "content": (
+                        f"> [!summary]\n"
+                        f"> Key concepts from {plan_entry['title']} in {original_name}.\n\n"
+                        f"## Overview\n\n"
+                        f"This note covers {plan_entry.get('scope', plan_entry['title'])} "
+                        f"from {original_name}"
+                        f"{f', Chapter: {chapter}' if chapter else ''}"
+                        f"{f', p. {page}' if page else ''}.\n\n"
+                        f"## Source Material\n\n"
+                        f"{source_excerpt}\n\n"
+                        f"## See Also\n\n"
+                        + "\n".join(f"- [[{t}]]" for t in linkable[:8])
+                    ),
+                }
+
+            completed += 1
+            await set_step(
+                document_id,
+                f"Creating notes... ({completed}/{total_planned} complete)",
+                notes_count=completed,
+            )
+            return (idx, plan_entry, note_data)
+
+    results = await asyncio.gather(
+        *[_generate_one(i, entry) for i, entry in enumerate(note_plan)],
+        return_exceptions=True,
+    )
+
+    # ── Write to DB in plan order (preserves parent-child) ────────────
+    slug_map: dict[str, int] = {}
+    created_notes = []
+
+    ordered = sorted(
+        [(idx, entry, data) for idx, entry, data in results if not isinstance(data, BaseException)],
+        key=lambda x: x[0],
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    for idx, plan_entry, note_data in ordered:
         base_slug = slugify(plan_entry["title"], lowercase=True)
         slug = base_slug
         counter = 1
@@ -186,7 +384,6 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             counter += 1
         existing_slugs.add(slug)
 
-        # Determine parent
         parent_title = plan_entry.get("parent_title")
         parent_id = slug_map.get(parent_title) if parent_title else None
 
@@ -194,17 +391,14 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
         if isinstance(tags, str):
             tags = [tags]
 
-        # Determine doc_type from plan
         doc_type = plan_entry.get("doc_type", "concept")
-
-        # Build depends_on/used_by from plan
         depends_on = plan_entry.get("depends_on", [])
         if parent_title:
             depends_on = [parent_title] + [d for d in depends_on if d != parent_title]
         used_by = plan_entry.get("used_by", [])
 
-        # Build the full note content with frontmatter
         chapter = plan_entry.get("chapter")
+        page = plan_entry.get("page", 1)
         source_location = f"pp. {page}" if page else ""
         folder = plan_entry.get("folder", "")
 
@@ -220,13 +414,11 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             doc_type=doc_type,
         )
 
-        # Assemble full content: frontmatter + H1 + body
         body = note_data.get("content", "")
         full_content = f"{frontmatter}\n\n# {plan_entry['title']}\n\n{body}"
 
-        now = datetime.now(timezone.utc).isoformat()
         note = Note(
-            document_id=document_id,
+            document_id=state["document_id"],
             parent_id=parent_id,
             title=plan_entry["title"],
             content=full_content,

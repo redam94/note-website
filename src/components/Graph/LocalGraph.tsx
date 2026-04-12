@@ -141,29 +141,47 @@ export default function LocalGraph({
         </button>
       </div>
 
-      {/* Modal */}
+      {/* Floating graph overlay */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "rgba(250, 249, 246, 0.97)" }}>
-          <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border)]">
-            <div className="flex items-center gap-3">
-              <h2 className="text-[14px] font-semibold text-[var(--heading)]">Graph View</h2>
-              <span className="text-[12px] text-[var(--muted)]">
-                {data.nodes.length} nodes · {data.edges.length} edges
-              </span>
+        <>
+          {/* Backdrop — click to close */}
+          <div
+            className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[2px]"
+            onClick={() => setModalOpen(false)}
+          />
+          {/* Floating frame */}
+          <div className="fixed z-50 rounded-xl border border-[var(--border)] shadow-2xl overflow-hidden"
+            style={{
+              top: "8%",
+              left: "10%",
+              width: "80%",
+              height: "78%",
+              background: "var(--bg)",
+            }}
+          >
+            {/* Header bar */}
+            <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border)] bg-[var(--surface)]">
+              <div className="flex items-center gap-3">
+                <h2 className="text-[13px] font-semibold text-[var(--heading)]">Graph View</h2>
+                <span className="text-[11px] text-[var(--muted)]">
+                  {data.nodes.length} nodes · {data.edges.length} edges
+                </span>
+              </div>
+              <button
+                onClick={() => setModalOpen(false)}
+                className="p-1 text-[var(--muted)] hover:text-[var(--text)] rounded hover:bg-[var(--surface2)] transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
             </div>
-            <button
-              onClick={() => setModalOpen(false)}
-              className="p-1.5 text-[var(--muted)] hover:text-[var(--text)] rounded hover:bg-[var(--surface2)] transition-colors"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
+            {/* Graph */}
+            <div className="w-full" style={{ height: "calc(100% - 37px)" }}>
+              <GraphModal data={data} focusNodeId={focusNodeId} onNodeClick={(slug) => { setModalOpen(false); router.push(`/notes/${slug}`); }} />
+            </div>
           </div>
-          <div className="flex-1">
-            <GraphModal data={data} focusNodeId={focusNodeId} onNodeClick={(slug) => { setModalOpen(false); router.push(`/notes/${slug}`); }} />
-          </div>
-        </div>
+        </>
       )}
     </>
   );

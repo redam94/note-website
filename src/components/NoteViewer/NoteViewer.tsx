@@ -108,7 +108,11 @@ function parseContent(raw: string): ContentBlock[] {
   }
 
   while (i < lines.length) {
-    const calloutMatch = lines[i].match(/^>\s*\[!(\w+)\]\s*(.*)/);
+    // Match callouts: both "> [!type] Title" and bare "[!type] Title" (no > prefix)
+    const calloutMatch =
+      lines[i].match(/^>\s*\[!(\w+)\]\s*(.*)/) ||
+      lines[i].match(/^\[!(\w+)\]\s*(.*)/);
+
     if (calloutMatch) {
       flushMd();
       const type = calloutMatch[1].toLowerCase();
@@ -116,12 +120,31 @@ function parseContent(raw: string): ContentBlock[] {
       const meta = CALLOUT_META[type] || CALLOUT_META.tip;
       const label = title || meta.label;
 
+      const hasQuotePrefix = lines[i].trimStart().startsWith(">");
       const bodyLines: string[] = [];
       i++;
-      while (i < lines.length && lines[i].match(/^>/)) {
-        bodyLines.push(lines[i].replace(/^>\s?/, ""));
-        i++;
+
+      // Collect body lines — handle both > prefixed and bare continuation
+      while (i < lines.length) {
+        const line = lines[i];
+        if (line.match(/^>\s/)) {
+          // Standard blockquote continuation
+          bodyLines.push(line.replace(/^>\s?/, ""));
+          i++;
+        } else if (!hasQuotePrefix && line.trim() && !line.match(/^(#{1,4}\s|>\s*\[!|\[!)/) && !line.match(/^\s*$/)) {
+          // Bare callout continuation: non-empty, not a heading, not another callout
+          bodyLines.push(line);
+          i++;
+        } else {
+          break;
+        }
       }
+
+      // Skip blank lines after body for bare callouts
+      if (!hasQuotePrefix) {
+        while (i < lines.length && lines[i].trim() === "") { i++; }
+      }
+
       const body = bodyLines
         .filter((l) => !l.match(/^\^[\w-]+$/))
         .join("\n")
@@ -153,6 +176,11 @@ const mdComponents = {
     }
     return <a href={href} className="text-[var(--link)] hover:underline">{children}</a>;
   },
+  table: ({ children, ...props }: any) => (
+    <div className="table-wrapper">
+      <table {...props}>{children}</table>
+    </div>
+  ),
 };
 
 // ── Component ────────────────────────────────────────────────────────
@@ -191,6 +219,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
     try {
       const res = await fetch(`/api/notes/${slug}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
+      window.dispatchEvent(new Event("sidebar-refresh"));
       router.push("/");
     } catch {
       setDeleting(false);

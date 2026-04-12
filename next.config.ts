@@ -9,6 +9,10 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  // Increase proxy timeout for long-running LLM operations
+  experimental: {
+    proxyTimeout: 300_000, // 5 minutes
+  },
 };
 
 export default nextConfig;

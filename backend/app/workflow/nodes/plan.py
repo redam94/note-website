@@ -94,13 +94,28 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
             text = page_texts[page - 1]["text"]
             snippets.append(f"## {section['title']} (page {page})\n{text[:400]}...")
 
+    # Include pre-extracted structure metadata
+    structure_info = ""
+    tables = state.get("extracted_tables", [])
+    equations = state.get("extracted_equations", [])
+    definitions = state.get("extracted_definitions", [])
+    if tables:
+        structure_info += f"\n\nPre-extracted: {len(tables)} tables found in document."
+    if equations:
+        display_count = sum(1 for e in equations if e.get("type") == "display")
+        structure_info += f"\n{display_count} display equations, {len(equations) - display_count} inline math expressions."
+    if definitions:
+        def_terms = [d["term"] for d in definitions[:10]]
+        structure_info += f"\nDefinition-like patterns detected for: {', '.join(def_terms)}"
+
     prompt = (
         f"Document: {original_name}\n\n"
         f"Existing tags in knowledge base: {json.dumps(existing_tags_list)}\n\n"
         f"Existing notes in knowledge base (for depends_on/used_by references):\n"
         + "\n".join(f"- {t}" for t in existing_titles[:50])
         + f"\n\nDocument outline:\n{json.dumps(outline, indent=2)}\n\n"
-        f"Section previews:\n{''.join(snippets)}\n\n"
+        f"Section previews:\n{''.join(snippets)}"
+        f"{structure_info}\n\n"
         "Create a plan for extracting notes. Consider which notes need definitions, "
         "theorems, math, and examples. Plan the dependency relationships."
     )

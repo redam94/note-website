@@ -36,18 +36,47 @@ export default function MaintenancePage() {
     finally { setLoading(""); }
   }
 
+  async function pollJob(jobId: string, label: string) {
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/maintenance/jobs/${jobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+        setResults((prev) => {
+          const base = prev.filter((r) => !r.startsWith("⏳"));
+          return [`⏳ ${job.progress}`, ...base];
+        });
+        if (job.status === "done") {
+          clearInterval(poll);
+          setLoading("");
+          const resultLines = [];
+          if (job.result) {
+            if (job.result.details) resultLines.push(...job.result.details);
+            if (job.result.repaired !== undefined)
+              resultLines.unshift(`Repaired ${job.result.repaired}, skipped ${job.result.skipped}`);
+            if (job.result.indexes_created !== undefined)
+              resultLines.unshift(`Created ${job.result.indexes_created}, updated ${job.result.indexes_updated}`);
+          }
+          setResults(resultLines.length > 0 ? resultLines : [job.progress]);
+        } else if (job.status === "error") {
+          clearInterval(poll);
+          setLoading("");
+          setResults([`Error: ${job.progress}`]);
+        }
+      } catch { /* ignore poll errors */ }
+    }, 2000);
+  }
+
   async function runReindex() {
     setLoading("reindex");
     setResults([]);
     try {
       const res = await fetch("/api/maintenance/reindex", { method: "POST" });
       const data = await res.json();
-      setResults([
-        `Created ${data.indexes_created} indexes, updated ${data.indexes_updated}`,
-        ...data.details,
-      ]);
-    } catch { setResults(["Reindex failed"]); }
-    finally { setLoading(""); }
+      if (data.job_id) {
+        await pollJob(data.job_id, "Reindex");
+      }
+    } catch { setResults(["Reindex failed"]); setLoading(""); }
   }
 
   async function runFixLinks() {
@@ -67,12 +96,10 @@ export default function MaintenancePage() {
     try {
       const res = await fetch("/api/maintenance/repair-shallow", { method: "POST" });
       const data = await res.json();
-      setResults([
-        `Repaired ${data.repaired} notes, skipped ${data.skipped}`,
-        ...data.details.map((d: any) => `${d.title}: ${d.changes.join(", ")}`),
-      ]);
-    } catch { setResults(["Repair failed"]); }
-    finally { setLoading(""); }
+      if (data.job_id) {
+        await pollJob(data.job_id, "Repair");
+      }
+    } catch { setResults(["Repair failed"]); setLoading(""); }
   }
 
   async function repairNote(noteId: number) {

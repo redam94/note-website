@@ -49,6 +49,7 @@ export default function SearchPanel({
   );
   const [keywordResults, setKeywordResults] = useState<KeywordResult[]>([]);
   const [answer, setAnswer] = useState("");
+  const [statusMessages, setStatusMessages] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [answering, setAnswering] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -120,8 +121,12 @@ export default function SearchPanel({
   async function handleAsk() {
     setAnswering(true);
     setAnswer("");
+    setStatusMessages([]);
     setSmartResults(null);
     setKeywordResults([]);
+
+    const STATUS_PREFIX = "<<STATUS>>";
+
     try {
       const res = await fetch("/api/ask", {
         method: "POST",
@@ -130,11 +135,41 @@ export default function SearchPanel({
       });
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
+
       if (reader) {
+        let leftover = "";
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          setAnswer((prev) => prev + decoder.decode(value));
+
+          const text = leftover + decoder.decode(value, { stream: true });
+          leftover = "";
+
+          // Split by newlines to process line by line
+          const lines = text.split("\n");
+
+          // Last element may be incomplete — save for next chunk
+          leftover = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith(STATUS_PREFIX)) {
+              const msg = line.slice(STATUS_PREFIX.length).trim();
+              if (msg) setStatusMessages((prev) => [...prev, msg]);
+            } else {
+              // Answer content — append with the newline we split on
+              setAnswer((prev) => prev + line + "\n");
+            }
+          }
+        }
+
+        // Flush leftover
+        if (leftover) {
+          if (leftover.startsWith(STATUS_PREFIX)) {
+            const msg = leftover.slice(STATUS_PREFIX.length).trim();
+            if (msg) setStatusMessages((prev) => [...prev, msg]);
+          } else {
+            setAnswer((prev) => prev + leftover);
+          }
         }
       }
     } catch {
@@ -281,8 +316,13 @@ export default function SearchPanel({
         <div className="text-center py-8 text-[var(--muted)] text-sm">No keyword matches found.</div>
       )}
 
-      {mode === "ask" && (answer || answering) && (
-        <AnswerView question={query} answer={answer} isStreaming={answering} />
+      {mode === "ask" && (answer || answering || statusMessages.length > 0) && (
+        <AnswerView
+          question={query}
+          answer={answer}
+          isStreaming={answering}
+          statusMessages={statusMessages}
+        />
       )}
 
       {loading && (

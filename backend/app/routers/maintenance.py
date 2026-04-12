@@ -1,18 +1,23 @@
-"""Note maintenance endpoints — repair, reindex, and audit operations."""
+"""Note maintenance endpoints — repair, reindex, and audit operations.
+
+Long-running operations (repair-shallow, reindex) run as background tasks
+and store results in a module-level dict that the frontend can poll.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 from slugify import slugify
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import get_db
+from ..database import async_session, get_db
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
 from ..prompts import load_prompt
@@ -20,7 +25,11 @@ from ..services.model_provider import get_provider
 
 router = APIRouter(prefix="/api/maintenance")
 
-_repair_prompt = load_prompt("repair_note")
+_plan_prompt = load_prompt("repair_plan")
+_execute_prompt = load_prompt("repair_execute")
+
+# In-memory job status for background tasks
+_jobs: dict[str, dict] = {}
 
 
 # ── Schemas ───────────────────────────────────────────────────────────
@@ -52,25 +61,35 @@ class ReindexResult(BaseModel):
     details: list[str]
 
 
-class BulkRepairResult(BaseModel):
-    repaired: int
-    skipped: int
-    details: list[dict]
+class JobStatus(BaseModel):
+    job_id: str
+    status: str  # "running", "done", "error"
+    progress: str
+    result: dict | None
 
 
-# ── Audit ─────────────────────────────────────────────────────────────
+# ── Job status polling ────────────────────────────────────────────────
+
+
+@router.get("/jobs/{job_id}")
+async def get_job_status(job_id: str) -> JobStatus:
+    job = _jobs.get(job_id)
+    if not job:
+        return JobStatus(job_id=job_id, status="not_found", progress="", result=None)
+    return JobStatus(**job)
+
+
+# ── Audit (fast, no LLM) ─────────────────────────────────────────────
 
 
 @router.get("/audit")
 async def audit_vault(db: AsyncSession = Depends(get_db)) -> AuditResult:
-    """Scan all notes for structural issues."""
     result = await db.execute(select(Note))
     all_notes = result.scalars().all()
 
     edges_result = await db.execute(select(GraphEdge))
     all_edges = edges_result.scalars().all()
 
-    # Build sets for analysis
     note_ids = {n.id for n in all_notes}
     linked_ids = set()
     for e in all_edges:
@@ -86,61 +105,50 @@ async def audit_vault(db: AsyncSession = Depends(get_db)) -> AuditResult:
     orphans = []
     broken = []
 
+    all_titles = {n.title for n in all_notes}
+
     for n in all_notes:
-        # Check frontmatter completeness
-        issues = []
         content = n.content or ""
-        has_fm = content.startswith("---")
-        if not has_fm:
+
+        # Frontmatter check
+        issues = []
+        if not content.startswith("---"):
             issues.append("no frontmatter")
         else:
             fm = content.split("---")[1] if "---" in content[3:] else ""
-            if "depends_on" not in fm:
-                issues.append("missing depends_on")
-            if "used_by" not in fm:
-                issues.append("missing used_by")
-            if "doc_type" not in fm:
-                issues.append("missing doc_type")
-            if "folder" not in fm:
-                issues.append("missing folder")
-
+            for field in ["depends_on", "used_by", "doc_type", "folder"]:
+                if field not in fm:
+                    issues.append(f"missing {field}")
         if issues:
             missing_fm.append({"id": n.id, "title": n.title, "issues": issues})
 
-        # Check if shallow
+        # Shallow check
         body = re.sub(r"^---[\s\S]*?---\n*", "", content)
         word_count = len(body.split())
         if word_count < 150:
             shallow.append({"id": n.id, "title": n.title, "words": word_count})
 
-        # Check if orphan (no edges, no parent, no children)
+        # Orphan check
         if n.id not in linked_ids:
             orphans.append({"id": n.id, "title": n.title, "slug": n.slug})
 
-        # Check for broken wiki-links
+        # Broken wiki-links
         wiki_links = re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]", content)
-        all_titles = {note.title for note in all_notes}
-        for link_target in wiki_links:
-            if link_target not in all_titles and not link_target.startswith("raw/"):
-                broken.append({"note_id": n.id, "note_title": n.title, "broken_link": link_target})
+        for target in wiki_links:
+            if target not in all_titles and not target.startswith("raw/"):
+                broken.append({"note_id": n.id, "note_title": n.title, "broken_link": target})
 
-    # Find folders that need indexes
+    # Missing indexes
     folders = set()
     for n in all_notes:
-        if n.source:
-            folders.add(n.source)
         fm_match = re.search(r'folder:\s*"?([^"\n]+)"?', n.content or "")
         if fm_match:
             parts = fm_match.group(1).strip().split("/")
             for i in range(len(parts)):
                 folders.add("/".join(parts[: i + 1]))
 
-    index_titles = {n.title for n in all_notes if "index" in n.title.lower()}
-    missing_indexes = []
-    for folder in sorted(folders):
-        expected = f"Index: {folder}"
-        if expected not in index_titles and folder:
-            missing_indexes.append(folder)
+    index_titles = {n.title for n in all_notes if n.title.startswith("Index:")}
+    missing_indexes = [f for f in sorted(folders) if f and f"Index: {f}" not in index_titles]
 
     return AuditResult(
         total_notes=len(all_notes),
@@ -152,7 +160,7 @@ async def audit_vault(db: AsyncSession = Depends(get_db)) -> AuditResult:
     )
 
 
-# ── Repair Single Note ───────────────────────────────────────────────
+# ── Repair Single Note (two-phase: Sonnet plans, Haiku executes) ──────
 
 
 @router.post("/repair")
@@ -160,67 +168,118 @@ async def repair_note(
     body: RepairRequest,
     db: AsyncSession = Depends(get_db),
 ) -> RepairResult:
-    """Repair a single note: fix frontmatter, enrich content, add links."""
     result = await db.execute(select(Note).where(Note.id == body.note_id))
     note = result.scalar_one_or_none()
     if not note:
         return RepairResult(note_id=body.note_id, title="Not found", changes=[], new_links=[])
 
-    # Get all note titles for linking
     titles_result = await db.execute(select(Note.title).where(Note.id != note.id))
     all_titles = [t for (t,) in titles_result.all()]
 
-    provider = await get_provider(db)
+    # Get context from related notes (neighbors) for enrichment
+    edges_result = await db.execute(
+        select(GraphEdge).where(
+            or_(GraphEdge.source_id == note.id, GraphEdge.target_id == note.id)
+        )
+    )
+    neighbor_ids = set()
+    for e in edges_result.scalars().all():
+        neighbor_ids.add(e.source_id if e.source_id != note.id else e.target_id)
+    if note.parent_id:
+        neighbor_ids.add(note.parent_id)
 
-    prompt = (
-        f"## Note to repair:\n\n{note.content}\n\n"
-        f"## Available notes for cross-linking:\n"
-        + "\n".join(f"- {t}" for t in all_titles[:60])
+    neighbor_context = ""
+    if neighbor_ids:
+        neighbors_result = await db.execute(
+            select(Note).where(Note.id.in_(neighbor_ids))
+        )
+        neighbor_summaries = []
+        for n in neighbors_result.scalars().all():
+            summary = n.summary or n.content[:300]
+            neighbor_summaries.append(f"[[{n.title}]]: {summary}")
+        neighbor_context = "\n".join(neighbor_summaries[:10])
+
+    provider = await get_provider(db)
+    titles_text = "\n".join(f"- {t}" for t in all_titles[:60])
+
+    # ── Phase 1: Sonnet diagnoses and plans the repair ────────────
+    plan_prompt = (
+        f"## Note to analyze:\n\n{note.content}\n\n"
+        f"## Related notes context:\n{neighbor_context}\n\n"
+        f"## Available notes for cross-linking:\n{titles_text}"
     )
 
     try:
-        response = await provider.complete(
-            messages=[{"role": "user", "content": prompt}],
-            system=_repair_prompt.format(),
-            max_tokens=8192,
+        plan_response = await provider.complete(
+            messages=[{"role": "user", "content": plan_prompt}],
+            system=_plan_prompt.format(),
+            max_tokens=2048,
             tier="advanced",
         )
-        json_match = re.search(r"\{.*\}", response, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
-        else:
-            data = json.loads(response)
-
-        new_content = data.get("content", note.content)
-        changes = data.get("changes", [])
-        new_links = data.get("new_links_added", [])
-
-        # Validate the response looks like a note
-        if new_content and (new_content.startswith("---") or new_content.startswith("#")):
-            note.content = new_content
-            await db.commit()
-
-        return RepairResult(
-            note_id=note.id,
-            title=note.title,
-            changes=changes,
-            new_links=new_links,
-        )
+        json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
+        repair_plan = json.loads(json_match.group()) if json_match else json.loads(plan_response)
     except Exception as e:
         return RepairResult(
-            note_id=note.id,
-            title=note.title,
-            changes=[f"Error: {str(e)}"],
-            new_links=[],
+            note_id=note.id, title=note.title,
+            changes=[f"Planning failed: {str(e)}"], new_links=[],
+        )
+
+    issues = repair_plan.get("issues_found", [])
+    if not issues:
+        return RepairResult(
+            note_id=note.id, title=note.title,
+            changes=["No issues found"], new_links=[],
+        )
+
+    # ── Phase 2: Haiku executes the repair plan ───────────────────
+    execute_prompt = (
+        f"## Current note:\n\n{note.content}\n\n"
+        f"## Repair plan to follow:\n{json.dumps(repair_plan, indent=2)}\n\n"
+        f"## Related notes for context:\n{neighbor_context}\n\n"
+        f"## Available notes for [[wiki-links]]:\n{titles_text}\n\n"
+        "Rewrite the note according to the repair plan. Include all fixes."
+    )
+
+    try:
+        new_content = await provider.complete(
+            messages=[{"role": "user", "content": execute_prompt}],
+            system=_execute_prompt.format(),
+            max_tokens=8192,
+            tier="simple",
+        )
+
+        # Validate response looks like a note
+        stripped = new_content.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```\w*\n?", "", stripped)
+            stripped = re.sub(r"\n?```$", "", stripped)
+
+        if stripped.startswith("---") or stripped.startswith("#"):
+            note.content = stripped
+            await db.commit()
+
+            links_to_insert = repair_plan.get("links_to_insert", [])
+            return RepairResult(
+                note_id=note.id, title=note.title,
+                changes=issues, new_links=links_to_insert,
+            )
+        else:
+            return RepairResult(
+                note_id=note.id, title=note.title,
+                changes=["Execution produced invalid output"], new_links=[],
+            )
+    except Exception as e:
+        return RepairResult(
+            note_id=note.id, title=note.title,
+            changes=[f"Execution failed: {str(e)}"], new_links=[],
         )
 
 
-# ── Fix Cross-References ─────────────────────────────────────────────
+# ── Fix Cross-References (fast, no LLM) ──────────────────────────────
 
 
 @router.post("/fix-links")
 async def fix_cross_references(db: AsyncSession = Depends(get_db)) -> dict:
-    """Ensure depends_on/used_by are bidirectionally consistent across all notes."""
     result = await db.execute(select(Note))
     all_notes = result.scalars().all()
     title_to_note = {n.title: n for n in all_notes}
@@ -232,23 +291,18 @@ async def fix_cross_references(db: AsyncSession = Depends(get_db)) -> dict:
         if not fm_match:
             continue
 
-        # Extract depends_on from frontmatter
         depends = re.findall(r'depends_on:.*?(?=\n\w|\n---|\Z)', fm_match.group(1), re.DOTALL)
         dep_titles = re.findall(r'\[\[([^\]]+)\]\]', "".join(depends))
 
-        # For each dependency, ensure the target has used_by pointing back
         for dep_title in dep_titles:
             target = title_to_note.get(dep_title)
             if not target:
                 continue
             target_content = target.content or ""
             if f"[[{note.title}]]" not in target_content:
-                # Add to used_by if section exists
                 if "used_by:" in target_content:
                     target.content = target_content.replace(
-                        "used_by:",
-                        f'used_by:\n  - "[[{note.title}]]"',
-                        1,
+                        "used_by:", f'used_by:\n  - "[[{note.title}]]"', 1
                     )
                     fixes += 1
 
@@ -256,160 +310,169 @@ async def fix_cross_references(db: AsyncSession = Depends(get_db)) -> dict:
     return {"fixes_applied": fixes, "notes_scanned": len(all_notes)}
 
 
-# ── Reindex ───────────────────────────────────────────────────────────
+# ── Reindex (background task) ─────────────────────────────────────────
 
 
 @router.post("/reindex")
-async def reindex_vault(db: AsyncSession = Depends(get_db)) -> ReindexResult:
-    """Create or update index notes for each folder level in the hierarchy."""
-    result = await db.execute(select(Note))
-    all_notes = result.scalars().all()
-
-    # Build folder hierarchy from note content
-    folder_notes: dict[str, list[Note]] = {}
-    for n in all_notes:
-        folder = None
-        fm_match = re.search(r'folder:\s*"?([^"\n]+)"?', n.content or "")
-        if fm_match:
-            folder = fm_match.group(1).strip()
-        if not folder and n.source:
-            folder = n.source
-
-        if folder:
-            # Add to this folder and all parent folders
-            parts = folder.split("/")
-            for i in range(len(parts)):
-                path = "/".join(parts[: i + 1])
-                folder_notes.setdefault(path, []).append(n)
-
-    provider = await get_provider(db)
-    existing_slugs_result = await db.execute(select(Note.slug))
-    existing_slugs = set(existing_slugs_result.scalars().all())
-    existing_index_titles = {n.title: n for n in all_notes if n.title.startswith("Index:")}
-
-    created = 0
-    updated = 0
-    details = []
-    now = datetime.now(timezone.utc)
-
-    from ..prompts import load_prompt
-    index_system = load_prompt("index_gen").format()
-
-    for folder_path, notes in sorted(folder_notes.items()):
-        # Only create indexes for folders with 2+ notes
-        if len(notes) < 2:
-            continue
-
-        index_title = f"Index: {folder_path}"
-        children_desc = "\n".join(
-            f"- {n.title} (tags: {n.tags or '[]'})" for n in notes[:20]
-        )
-
-        prompt = (
-            f"Folder: {folder_path}\n"
-            f"Notes in this folder ({len(notes)}):\n{children_desc}\n\n"
-            "Create an index note for this folder."
-        )
-
-        try:
-            response = await provider.complete(
-                messages=[{"role": "user", "content": prompt}],
-                system=index_system,
-                max_tokens=2048,
-                tier="simple",
-            )
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                index_data = json.loads(json_match.group())
-            else:
-                index_data = json.loads(response)
-        except Exception:
-            index_data = {
-                "summary": f"Index for {folder_path}",
-                "content": f"## Notes\n{children_desc}",
-            }
-
-        frontmatter = (
-            f"---\n"
-            f'title: "{index_title}"\n'
-            f"tags:\n  - type/index\n  - source/ingested\n"
-            f"date_updated: {now.strftime('%Y-%m-%d')}\n"
-            f"concept_count: {len(notes)}\n"
-            f"---"
-        )
-        full_content = f"{frontmatter}\n\n# {folder_path}\n\n{index_data.get('content', '')}"
-
-        if index_title in existing_index_titles:
-            # Update existing
-            existing = existing_index_titles[index_title]
-            existing.content = full_content
-            existing.summary = index_data.get("summary")
-            updated += 1
-            details.append(f"Updated: {index_title}")
-        else:
-            # Create new
-            slug = slugify(index_title, lowercase=True)
-            counter = 1
-            base_slug = slug
-            while slug in existing_slugs:
-                slug = f"{base_slug}-{counter}"
-                counter += 1
-            existing_slugs.add(slug)
-
-            index_note = Note(
-                document_id=None,
-                parent_id=None,
-                title=index_title,
-                content=full_content,
-                slug=slug,
-                tags=json.dumps(["type/index"]),
-                level=0,
-                created_at=now.isoformat(),
-                summary=index_data.get("summary"),
-            )
-            db.add(index_note)
-            created += 1
-            details.append(f"Created: {index_title}")
-
-    await db.commit()
-    return ReindexResult(indexes_updated=updated, indexes_created=created, details=details)
+async def reindex_vault(background_tasks: BackgroundTasks) -> dict:
+    job_id = f"reindex-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+    _jobs[job_id] = {"job_id": job_id, "status": "running", "progress": "Starting...", "result": None}
+    background_tasks.add_task(_run_reindex, job_id)
+    return {"job_id": job_id, "status": "started"}
 
 
-# ── Bulk Repair Shallow Notes ─────────────────────────────────────────
+async def _run_reindex(job_id: str):
+    try:
+        async with async_session() as db:
+            result = await db.execute(select(Note))
+            all_notes = result.scalars().all()
+
+        folder_notes: dict[str, list] = {}
+        for n in all_notes:
+            fm_match = re.search(r'folder:\s*"?([^"\n]+)"?', n.content or "")
+            folder = fm_match.group(1).strip() if fm_match else (n.source or "")
+            if folder:
+                parts = folder.split("/")
+                for i in range(len(parts)):
+                    path = "/".join(parts[: i + 1])
+                    folder_notes.setdefault(path, []).append(n)
+
+        async with async_session() as db:
+            provider = await get_provider(db)
+            slugs_result = await db.execute(select(Note.slug))
+            existing_slugs = set(slugs_result.scalars().all())
+            existing_indexes = {}
+            for n in all_notes:
+                if n.title.startswith("Index:"):
+                    existing_indexes[n.title] = n
+
+        from ..prompts import load_prompt
+        index_system = load_prompt("index_gen").format()
+
+        created = 0
+        updated = 0
+        details = []
+        now = datetime.now(timezone.utc)
+
+        total_folders = len([f for f, notes in folder_notes.items() if len(notes) >= 2])
+        done = 0
+
+        for folder_path, notes in sorted(folder_notes.items()):
+            if len(notes) < 2:
+                continue
+
+            _jobs[job_id]["progress"] = f"Indexing {folder_path}... ({done}/{total_folders})"
+
+            index_title = f"Index: {folder_path}"
+            children_desc = "\n".join(f"- {n.title}" for n in notes[:20])
+
+            try:
+                response = await provider.complete(
+                    messages=[{"role": "user", "content": f"Folder: {folder_path}\nNotes ({len(notes)}):\n{children_desc}"}],
+                    system=index_system,
+                    max_tokens=2048,
+                    tier="simple",
+                )
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
+                index_data = json.loads(json_match.group()) if json_match else json.loads(response)
+            except Exception:
+                index_data = {"summary": f"Index for {folder_path}", "content": f"## Notes\n{children_desc}"}
+
+            frontmatter = f"---\ntitle: \"{index_title}\"\ntags:\n  - type/index\ndate_updated: {now.strftime('%Y-%m-%d')}\nconcept_count: {len(notes)}\n---"
+            full_content = f"{frontmatter}\n\n# {folder_path}\n\n{index_data.get('content', '')}"
+
+            async with async_session() as db:
+                if index_title in existing_indexes:
+                    existing = await db.execute(select(Note).where(Note.title == index_title))
+                    idx_note = existing.scalar_one_or_none()
+                    if idx_note:
+                        idx_note.content = full_content
+                        idx_note.summary = index_data.get("summary")
+                        updated += 1
+                        details.append(f"Updated: {index_title}")
+                else:
+                    slug = slugify(index_title, lowercase=True)
+                    c = 1
+                    while slug in existing_slugs:
+                        slug = f"{slugify(index_title, lowercase=True)}-{c}"
+                        c += 1
+                    existing_slugs.add(slug)
+
+                    db.add(Note(
+                        title=index_title,
+                        content=full_content,
+                        slug=slug,
+                        tags=json.dumps(["type/index"]),
+                        level=0,
+                        created_at=now.isoformat(),
+                        summary=index_data.get("summary"),
+                    ))
+                    created += 1
+                    details.append(f"Created: {index_title}")
+                await db.commit()
+
+            done += 1
+
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": "done",
+            "progress": f"Complete: {created} created, {updated} updated",
+            "result": {"indexes_created": created, "indexes_updated": updated, "details": details},
+        }
+    except Exception as e:
+        _jobs[job_id] = {"job_id": job_id, "status": "error", "progress": str(e), "result": None}
+
+
+# ── Repair Shallow (background task) ──────────────────────────────────
 
 
 @router.post("/repair-shallow")
-async def repair_shallow_notes(
-    db: AsyncSession = Depends(get_db),
-) -> BulkRepairResult:
-    """Find and repair all notes with < 150 words of content."""
-    result = await db.execute(select(Note))
-    all_notes = result.scalars().all()
+async def repair_shallow_notes(background_tasks: BackgroundTasks) -> dict:
+    job_id = f"repair-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+    _jobs[job_id] = {"job_id": job_id, "status": "running", "progress": "Finding shallow notes...", "result": None}
+    background_tasks.add_task(_run_repair_shallow, job_id)
+    return {"job_id": job_id, "status": "started"}
 
-    shallow = []
-    for n in all_notes:
-        body = re.sub(r"^---[\s\S]*?---\n*", "", n.content or "")
-        if len(body.split()) < 150:
-            shallow.append(n)
 
-    if not shallow:
-        return BulkRepairResult(repaired=0, skipped=0, details=[])
+async def _run_repair_shallow(job_id: str):
+    try:
+        async with async_session() as db:
+            result = await db.execute(select(Note))
+            all_notes = result.scalars().all()
 
-    repaired = 0
-    skipped = 0
-    details = []
+        shallow = []
+        for n in all_notes:
+            body = re.sub(r"^---[\s\S]*?---\n*", "", n.content or "")
+            if len(body.split()) < 150:
+                shallow.append(n)
 
-    for note in shallow[:10]:  # Limit to 10 at a time
-        try:
-            repair_result = await repair_note(
-                RepairRequest(note_id=note.id), db
-            )
-            if repair_result.changes:
-                repaired += 1
-                details.append({"title": note.title, "changes": repair_result.changes})
-            else:
+        if not shallow:
+            _jobs[job_id] = {"job_id": job_id, "status": "done", "progress": "No shallow notes found", "result": {"repaired": 0, "skipped": 0, "details": []}}
+            return
+
+        repaired = 0
+        skipped = 0
+        details = []
+
+        for i, note in enumerate(shallow[:10]):
+            _jobs[job_id]["progress"] = f"Repairing {i + 1}/{min(len(shallow), 10)}: {note.title[:40]}..."
+
+            try:
+                async with async_session() as db:
+                    r = await repair_note(RepairRequest(note_id=note.id), db)
+                    if r.changes and not any("Error" in c for c in r.changes):
+                        repaired += 1
+                        details.append({"title": note.title, "changes": r.changes})
+                    else:
+                        skipped += 1
+            except Exception:
                 skipped += 1
-        except Exception:
-            skipped += 1
 
-    return BulkRepairResult(repaired=repaired, skipped=skipped, details=details)
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": "done",
+            "progress": f"Complete: {repaired} repaired, {skipped} skipped",
+            "result": {"repaired": repaired, "skipped": skipped, "details": details},
+        }
+    except Exception as e:
+        _jobs[job_id] = {"job_id": job_id, "status": "error", "progress": str(e), "result": None}
