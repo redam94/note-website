@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState, useMemo, Fragment } from "react";
+import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/components/AuthProvider";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -193,6 +194,8 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const router = useRouter();
+  const { role } = useAuth();
+  const isAdmin = role === "admin";
 
   useEffect(() => {
     setLoading(true);
@@ -279,7 +282,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
               {note.title}
             </h1>
             <div className="flex-shrink-0 mt-1">
-              {confirmDelete ? (
+              {!isAdmin ? null : confirmDelete ? (
                 <div className="flex items-center gap-1.5">
                   <button onClick={handleDelete} disabled={deleting}
                     className="px-2 py-1 text-[11px] bg-[var(--danger)] text-white rounded hover:opacity-90">

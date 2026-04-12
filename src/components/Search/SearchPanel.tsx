@@ -79,9 +79,18 @@ export default function SearchPanel({
     setKeywordResults([]);
     setAnswer("");
     try {
-      const res = await fetch(
+      // Try AI-powered smart search first
+      let res = await fetch(
         `/api/search/smart?q=${encodeURIComponent(searchQuery)}`
       );
+
+      // If forbidden (no API key), fall back to graph-powered enhanced search
+      if (res.status === 403) {
+        res = await fetch(
+          `/api/search/enhanced?q=${encodeURIComponent(searchQuery)}`
+        );
+      }
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       try {
@@ -91,7 +100,6 @@ export default function SearchPanel({
         throw new Error("Invalid response from server");
       }
     } catch {
-      // Fallback to keyword
       setMode("keyword");
       await handleKeywordSearch();
     } finally {

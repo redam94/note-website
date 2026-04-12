@@ -17,13 +17,14 @@ from slugify import slugify
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_admin
 from ..database import async_session, get_db
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
 from ..prompts import load_prompt
 from ..services.model_provider import get_provider
 
-router = APIRouter(prefix="/api/maintenance")
+router = APIRouter(prefix="/api/maintenance", dependencies=[Depends(require_admin)])
 
 _plan_prompt = load_prompt("repair_plan")
 _execute_prompt = load_prompt("repair_execute")

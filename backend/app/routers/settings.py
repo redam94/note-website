@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_admin
 from ..database import get_db
 from ..models.settings import Settings
 from ..schemas.settings import (
@@ -50,7 +51,7 @@ async def set_setting(db: AsyncSession, key: str, value: str):
         db.add(Settings(key=key, value=value))
 
 
-@router.get("/settings")
+@router.get("/settings", dependencies=[Depends(require_admin)])
 async def get_settings(db: AsyncSession = Depends(get_db)) -> SettingsResponse:
     return SettingsResponse(
         simple_model=await get_setting(db, "simple_model"),
@@ -60,7 +61,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)) -> SettingsResponse:
     )
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[Depends(require_admin)])
 async def update_settings(
     body: SettingsUpdate,
     db: AsyncSession = Depends(get_db),

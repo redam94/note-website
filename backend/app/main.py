@@ -6,12 +6,11 @@ from sqlalchemy import text
 
 from .config import settings
 from .database import engine
-from .routers import ask, documents, graph, graph_tools, link, maintenance, notes, search, settings as settings_router
+from .routers import ask, auth, documents, graph, graph_tools, link, maintenance, notes, search, settings as settings_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Enable WAL mode and foreign keys on startup
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(text("PRAGMA foreign_keys=ON"))
@@ -29,6 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(documents.router)
 app.include_router(notes.router)
 app.include_router(search.router)

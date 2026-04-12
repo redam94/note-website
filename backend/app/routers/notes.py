@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_admin
 from ..database import get_db
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
@@ -90,7 +91,7 @@ async def get_note(slug: str, db: AsyncSession = Depends(get_db)) -> NoteWithLin
     return NoteWithLinks.from_row(note, backlinks, outlinks)
 
 
-@router.delete("/notes/{slug}")
+@router.delete("/notes/{slug}", dependencies=[Depends(require_admin)])
 async def delete_note(slug: str, db: AsyncSession = Depends(get_db)):
     """Delete a note and clean up all dead cross-links.
 

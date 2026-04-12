@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_admin
+
 from ..config import settings
 from ..database import get_db
 from ..models.document import Document
@@ -36,7 +38,7 @@ async def list_documents(db: AsyncSession = Depends(get_db)) -> list[DocumentRes
     return [DocumentResponse.from_row(r) for r in rows]
 
 
-@router.post("/documents", status_code=201)
+@router.post("/documents", status_code=201, dependencies=[Depends(require_admin)])
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),

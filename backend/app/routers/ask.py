@@ -11,6 +11,7 @@ from slugify import slugify
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import AuthUser, require_admin, require_user_with_key
 from ..database import get_db
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
@@ -156,7 +157,7 @@ async def _retrieve_notes(
 # ── Ask endpoint ──────────────────────────────────────────────────────
 
 
-@router.post("/ask")
+@router.post("/ask", dependencies=[Depends(require_user_with_key)])
 async def ask_knowledge_base(
     body: AskRequest,
     db: AsyncSession = Depends(get_db),
@@ -320,7 +321,7 @@ class SaveAnswerRequest(BaseModel):
     tags: list[str] = []
 
 
-@router.post("/ask/save")
+@router.post("/ask/save", dependencies=[Depends(require_user_with_key)])
 async def save_answer(
     body: SaveAnswerRequest,
     db: AsyncSession = Depends(get_db),

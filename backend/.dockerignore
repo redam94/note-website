@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+.env
+data/
+uploads/
+alembic/versions/__pycache__
+tests/

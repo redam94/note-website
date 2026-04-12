@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_user_with_key
 from ..database import get_db
 from ..models.note import Note
 from ..prompts import load_prompt
@@ -99,7 +100,118 @@ async def search_notes(
     return results
 
 
-@router.get("/search/smart")
+@router.get("/search/enhanced")
+async def enhanced_search(
+    q: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+) -> SmartSearchResponse:
+    """Graph-powered search without LLM — available to all users."""
+    from ..services.graph_search import find_by_tag, find_related, grep_notes, list_all_tags
+
+    # Tokenize query
+    stop_words = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of", "and", "or", "with", "how", "what", "why", "when", "does", "can", "should"}
+    terms = [w for w in q.lower().split() if len(w) > 2 and w not in stop_words]
+
+    if not terms:
+        return SmartSearchResponse(query=q, interpretation=q, results=[], suggested_queries=[])
+
+    # 1. Grep search for each term
+    scored: dict[int, float] = {}
+    note_data: dict[int, dict] = {}
+
+    for term in terms[:5]:
+        matches = await grep_notes(db, term, limit=10)
+        for m in matches:
+            nid = m["id"]
+            note_data[nid] = m
+            pts = 3.0 if m.get("match_in_title") else 1.0
+            scored[nid] = scored.get(nid, 0) + pts
+
+    # 2. Tag search — check if any term matches a known tag
+    all_tags = await list_all_tags(db)
+    tag_names = {t["tag"].lower(): t["tag"] for t in all_tags}
+    matched_tags = []
+    for term in terms:
+        for tname_lower, tname in tag_names.items():
+            if term in tname_lower:
+                matched_tags.append(tname)
+                break
+
+    for tag in matched_tags[:3]:
+        tag_results = await find_by_tag(db, tag, limit=8)
+        for r in tag_results:
+            nid = r["id"]
+            note_data.setdefault(nid, r)
+            scored[nid] = scored.get(nid, 0) + 2.0
+
+    # 3. Graph expansion — find related notes for top 3 results
+    top_ids = sorted(scored, key=scored.get, reverse=True)[:3]
+    for seed_id in top_ids:
+        related = await find_related(db, seed_id, limit=5)
+        for r in related:
+            nid = r["id"]
+            note_data.setdefault(nid, r)
+            rel_score = r.get("relevance_score", 1.0)
+            scored[nid] = scored.get(nid, 0) + min(rel_score, 2.0)
+
+    # 4. Build results sorted by score
+    max_score = max(scored.values()) if scored else 1.0
+    smart_results: list[SmartSearchResult] = []
+
+    for nid in sorted(scored, key=scored.get, reverse=True)[:10]:
+        info = note_data.get(nid, {})
+        norm_score = round(scored[nid] / max_score, 2)
+        if norm_score < 0.15:
+            continue
+
+        # Build relevance reason from what matched
+        reasons = []
+        title = info.get("title", "")
+        for term in terms:
+            if term in title.lower():
+                reasons.append(f"title matches '{term}'")
+        if not reasons:
+            reasons.append("content matches search terms")
+        if nid in [r["id"] for tag in matched_tags[:1] for r in (await find_by_tag(db, tag, limit=20))]:
+            reasons.append(f"tagged with matching topic")
+
+        smart_results.append(SmartSearchResult(
+            id=nid,
+            title=title,
+            slug=info.get("slug", ""),
+            summary=info.get("summary"),
+            tags=info.get("tags", []),
+            relevance="; ".join(reasons[:2]),
+            score=norm_score,
+            source=info.get("source"),
+            chapter=info.get("chapter"),
+            page=info.get("page"),
+            level=info.get("level", 1),
+        ))
+
+    # 5. Generate suggested queries from tags
+    suggested = []
+    for tag in matched_tags[:2]:
+        suggested.append(f"notes tagged with {tag}")
+    if len(terms) > 1:
+        suggested.append(terms[0])  # suggest individual terms
+    if not suggested:
+        for t in all_tags[:3]:
+            suggested.append(f"notes about {t['tag']}")
+
+    interpretation = f"Searching for: {', '.join(terms)}"
+    if matched_tags:
+        interpretation += f" (matched tags: {', '.join(matched_tags[:3])})"
+
+    return SmartSearchResponse(
+        query=q,
+        interpretation=interpretation,
+        results=smart_results,
+        suggested_queries=suggested[:3],
+    )
+
+
+@router.get("/search/smart", dependencies=[Depends(require_user_with_key)])
 async def smart_search(
     q: str = Query(...),
     db: AsyncSession = Depends(get_db),

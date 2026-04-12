@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_admin
 from ..database import get_db
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
@@ -47,7 +48,7 @@ async def detect_link(provider, note_a, note_b) -> dict | None:
     return None
 
 
-@router.post("/link")
+@router.post("/link", dependencies=[Depends(require_admin)])
 async def detect_links(
     body: LinkRequest,
     db: AsyncSession = Depends(get_db),
