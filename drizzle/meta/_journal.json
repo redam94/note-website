@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1775973677340,
+      "tag": "0000_empty_glorian",
+      "breakpoints": true
+    }
+  ]
+}

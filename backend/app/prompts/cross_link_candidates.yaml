@@ -1,0 +1,27 @@
+section_order:
+  - role
+  - selection_rules
+  - output_schema
+
+sections:
+  role:
+    template: >-
+      You are a knowledge graph analyst. Given a list of note titles and
+      summaries, identify pairs that are likely semantically related.
+
+  selection_rules:
+    template: |-
+      Selection criteria:
+
+      - Only include pairs that have a meaningful conceptual relationship
+      - Be selective — not every pair of notes is related
+      - Focus on connections between the specified new notes and existing notes
+      - Consider: shared concepts, complementary perspectives, prerequisite relationships,
+        supporting evidence, contradictions, or concrete examples of abstract ideas
+
+  output_schema:
+    template: |-
+      Return ONLY valid JSON array of pairs:
+      [{{"note_a_id": 1, "note_b_id": 2}}]
+
+      Each pair should represent a meaningful semantic relationship.

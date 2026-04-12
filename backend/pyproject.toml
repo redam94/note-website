@@ -1,0 +1,38 @@
+[project]
+name = "note-website-backend"
+version = "0.1.0"
+description = "FastAPI backend for the note-website knowledge management app"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.21.0",
+    "alembic>=1.15.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-slugify>=8.0.0",
+    "httpx>=0.28.0",
+    "python-multipart>=0.0.20",
+    "anthropic>=0.52.0",
+    "openai>=1.70.0",
+    "pymupdf>=1.25.0",
+    "python-docx>=1.1.0",
+    "langgraph>=0.4.0",
+    "arq>=0.26.0",
+    "aiofiles>=25.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

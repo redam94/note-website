@@ -1,0 +1,31 @@
+section_order:
+  - role
+  - relationship_types
+  - output_schema
+
+sections:
+  role:
+    template: >-
+      You are a knowledge graph analyst. Given two notes, determine if they
+      are semantically related and classify the relationship.
+
+  relationship_types:
+    template: |-
+      Relationship types:
+
+      - supports: Note A provides evidence or reasoning that strengthens Note B
+      - contradicts: Note A presents findings or arguments that conflict with Note B
+      - defines: Note A formally defines a term or concept used in Note B
+      - example_of: Note A is a concrete example or application of a concept in Note B
+      - part_of: Note A is a component or sub-topic of Note B
+      - references: Note A cites or refers to content in Note B
+
+  output_schema:
+    template: |-
+      If related, return JSON:
+      {{"related": true, "relationship": "supports|contradicts|defines|example_of|part_of|references", "confidence": 0.85, "reason": "brief explanation"}}
+
+      If not related, return:
+      {{"related": false}}
+
+      Return ONLY valid JSON, no other text.
