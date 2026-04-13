@@ -14,6 +14,7 @@ from ..config import settings
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.document import Document
+from ..models.note import Note
 from ..models.space import Space
 from ..schemas.document import DocumentResponse
 from ..worker import run_processing_pipeline
@@ -37,7 +38,21 @@ def get_mime_type(filename: str) -> str:
 async def list_documents(db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> list[DocumentResponse]:
     result = await db.execute(select(Document).where(Document.space_id == current_space.id))
     rows = result.scalars().all()
-    return [DocumentResponse.from_row(r) for r in rows]
+
+    responses = []
+    for r in rows:
+        recent_notes: list[str] = []
+        if r.status in ("processing", "done"):
+            notes_result = await db.execute(
+                select(Note.title)
+                .where(Note.document_id == r.id)
+                .order_by(Note.id.desc())
+                .limit(8)
+            )
+            recent_notes = [t for (t,) in notes_result.all()]
+            recent_notes.reverse()  # oldest first
+        responses.append(DocumentResponse.from_row(r, recent_notes=recent_notes))
+    return responses
 
 
 @router.post("/documents", status_code=201, dependencies=[Depends(require_admin)])

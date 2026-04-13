@@ -57,6 +57,16 @@ async def ensure_tree(state: ProcessingState) -> ProcessingState:
         if path:
             path_to_id[path] = n.id
 
+    # Find the Root index to parent top-level folders under it
+    root_id: int | None = None
+    async with async_session() as db:
+        root_result = await db.execute(
+            select(Note).where(Note.title == "Index: Root").where(Note.space_id == state["space_id"])
+        )
+        root_note = root_result.scalar_one_or_none()
+        if root_note:
+            root_id = root_note.id
+
     # Sort folders by depth (shortest first) so parents are created before children
     sorted_folders = sorted(all_folders, key=lambda p: (p.count("/"), p))
 
@@ -67,10 +77,10 @@ async def ensure_tree(state: ProcessingState) -> ProcessingState:
         if folder_path in path_to_id:
             continue  # Already exists
 
-        # Determine parent
+        # Determine parent — top-level folders go under Root
         parts = folder_path.split("/")
         parent_path = "/".join(parts[:-1]) if len(parts) > 1 else None
-        parent_id = path_to_id.get(parent_path) if parent_path else None
+        parent_id = path_to_id.get(parent_path) if parent_path else root_id
 
         leaf_name = parts[-1]
         index_title = f"Index: {folder_path}"

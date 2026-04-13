@@ -381,7 +381,7 @@ async def _run_reindex(job_id: str, space_id: int):
 
         async with async_session() as db:
             provider = await get_provider(db)
-            slugs_result = await db.execute(select(Note.slug).where(Note.space_id == space_id))
+            slugs_result = await db.execute(select(Note.slug))
             existing_slugs = set(slugs_result.scalars().all())
             existing_indexes: dict[str, Note] = {}
             for n in all_notes:
@@ -397,6 +397,16 @@ async def _run_reindex(job_id: str, space_id: int):
         details = []
         now = datetime.now(timezone.utc)
 
+        # Find Root index to parent top-level folders under it
+        root_id: int | None = None
+        async with async_session() as db:
+            root_result = await db.execute(
+                select(Note).where(Note.title == "Index: Root").where(Note.space_id == space_id)
+            )
+            root_note = root_result.scalar_one_or_none()
+            if root_note:
+                root_id = root_note.id
+
         # Sort by depth so parents are created before children
         all_folder_paths = sorted(folder_notes.keys(), key=lambda p: (p.count("/"), p))
         total_folders = len(all_folder_paths)
@@ -410,10 +420,10 @@ async def _run_reindex(job_id: str, space_id: int):
             index_title = f"Index: {folder_path}"
             children_desc = "\n".join(f"- {n.title}" for n in notes[:20])
 
-            # Determine parent index
+            # Determine parent index — top-level folders go under Root
             parts = folder_path.split("/")
             parent_path = "/".join(parts[:-1]) if len(parts) > 1 else None
-            parent_id = path_to_id.get(parent_path) if parent_path else None
+            parent_id = path_to_id.get(parent_path) if parent_path else root_id
 
             try:
                 response = await provider.complete(

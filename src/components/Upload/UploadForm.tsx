@@ -4,6 +4,8 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useSpace } from "@/contexts/SpaceContext";
 import { apiUrl } from "@/lib/api";
+import ForceGraph from "@/components/Graph/ForceGraph";
+import type { GraphData } from "@/types";
 
 interface DocStatus {
   id: number;
@@ -12,6 +14,7 @@ interface DocStatus {
   error: string | null;
   processingStep: string | null;
   notesCount: number | null;
+  recentNotes: string[];
 }
 
 const PIPELINE_STAGES = [
@@ -20,10 +23,12 @@ const PIPELINE_STAGES = [
   { key: "extract", label: "Extract structure" },
   { key: "outline", label: "Build outline" },
   { key: "plan", label: "Plan notes" },
+  { key: "tree", label: "Build topic tree" },
   { key: "create", label: "Create notes" },
   { key: "index", label: "Generate indexes" },
   { key: "links", label: "Insert links" },
   { key: "crosslink", label: "Cross-link" },
+  { key: "community", label: "Detect clusters" },
   { key: "done", label: "Complete" },
 ];
 
@@ -33,14 +38,16 @@ function stageFromStep(step: string | null, status: string): number {
   if (!step) return 0;
   const s = step.toLowerCase();
   if (s.includes("parsing") || s.includes("parsed")) return 1;
-  if (s.includes("extracting") || s.includes("structure extracted")) return 2;
-  if (s.includes("using extracted") || s.includes("outline")) return 3;
+  if (s.includes("extracting") || s.includes("structure extracted") || s.includes("found")) return 2;
+  if (s.includes("using extracted") || s.includes("outline") || s.includes("toc")) return 3;
   if (s.includes("planning") || s.includes("planned")) return 4;
-  if (s.includes("creating note")) return 5;
-  if (s.includes("generating index")) return 6;
-  if (s.includes("inserting wiki") || s.includes("inserting link")) return 7;
-  if (s.includes("cross-link") || s.includes("detecting cross") || s.includes("classifying")) return 8;
-  return 1; // default to parse if processing
+  if (s.includes("topic tree") || s.includes("building topic")) return 5;
+  if (s.includes("creating note")) return 6;
+  if (s.includes("generating index") || s.includes("updating topic index")) return 7;
+  if (s.includes("inserting wiki") || s.includes("inserting link")) return 8;
+  if (s.includes("cross-link") || s.includes("detecting cross") || s.includes("classifying")) return 9;
+  if (s.includes("cluster") || s.includes("community")) return 10;
+  return 1;
 }
 
 export default function UploadForm() {
@@ -48,19 +55,58 @@ export default function UploadForm() {
   const [uploading, setUploading] = useState(false);
   const [docStatus, setDocStatus] = useState<DocStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [completedSteps, setCompletedSteps] = useState<string[]>([]);
   const [toast, setToast] = useState<string | null>(null);
+  const [activityLog, setActivityLog] = useState<string[]>([]);
+  const [liveGraph, setLiveGraph] = useState<GraphData | null>(null);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const lastStepRef = useRef<string>("");
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const graphContainerRef = useRef<HTMLDivElement>(null);
+  const [graphWidth, setGraphWidth] = useState(500);
   const spaceRef = useRef<string>("default");
   const router = useRouter();
   const { spaceSlug } = useSpace();
   spaceRef.current = spaceSlug;
 
-  // On mount: check for in-progress documents and resume polling
+  // Elapsed timer
+  useEffect(() => {
+    if (startTime) {
+      timerRef.current = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - startTime) / 1000));
+      }, 1000);
+    }
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [startTime]);
+
+  // Measure graph container
+  useEffect(() => {
+    function update() {
+      if (graphContainerRef.current) {
+        setGraphWidth(graphContainerRef.current.clientWidth);
+      }
+    }
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [liveGraph]);
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [activityLog]);
+
+  // On mount: check for in-progress documents
   useEffect(() => {
     async function checkInProgress() {
       try {
-        const res = await fetch(apiUrl("/api/documents", spaceSlug));
+        const res = await fetch(apiUrl("/api/documents", spaceRef.current));
         if (!res.ok) return;
         const docs = await res.json();
         const processing = docs.find(
@@ -68,6 +114,7 @@ export default function UploadForm() {
         );
         if (processing) {
           setUploading(true);
+          setStartTime(Date.now());
           setDocStatus({
             id: processing.id,
             originalName: processing.originalName,
@@ -75,7 +122,12 @@ export default function UploadForm() {
             error: null,
             processingStep: processing.processingStep || "Resuming...",
             notesCount: processing.notesCount,
+            recentNotes: processing.recentNotes || [],
           });
+          if (processing.processingStep) {
+            setActivityLog([processing.processingStep]);
+            lastStepRef.current = processing.processingStep;
+          }
           startPolling(processing.id);
         }
       } catch { /* ignore */ }
@@ -83,6 +135,7 @@ export default function UploadForm() {
     checkInProgress();
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
 
@@ -96,17 +149,40 @@ export default function UploadForm() {
         const current = docs.find((d: any) => d.id === docId);
         if (!current) return;
 
+        const step = current.processingStep;
+
+        // Append new step to activity log
+        if (step && step !== lastStepRef.current) {
+          lastStepRef.current = step;
+          setActivityLog((prev) => [...prev, step]);
+        }
+
         setDocStatus({
           id: current.id,
           originalName: current.originalName,
           status: current.status,
           error: current.error,
-          processingStep: current.processingStep,
+          processingStep: step,
           notesCount: current.notesCount,
+          recentNotes: current.recentNotes || [],
         });
+
+        // Fetch live graph once notes start appearing
+        if ((current.notesCount || 0) >= 1) {
+          try {
+            const graphRes = await fetch(apiUrl("/api/graph", spaceRef.current));
+            if (graphRes.ok) {
+              const graphData = await graphRes.json();
+              if (graphData.nodes.length > 0) {
+                setLiveGraph(graphData);
+              }
+            }
+          } catch { /* ignore graph fetch errors */ }
+        }
 
         if (current.status === "done") {
           if (pollRef.current) clearInterval(pollRef.current);
+          if (timerRef.current) clearInterval(timerRef.current);
           setUploading(false);
           setToast(`"${current.originalName}" processed — ${current.notesCount || 0} notes created`);
           setTimeout(() => setToast(null), 5000);
@@ -114,6 +190,7 @@ export default function UploadForm() {
           setTimeout(() => router.push("/"), 2500);
         } else if (current.status === "error") {
           if (pollRef.current) clearInterval(pollRef.current);
+          if (timerRef.current) clearInterval(timerRef.current);
           setError(current.error || "Processing failed");
           setUploading(false);
         }
@@ -134,7 +211,10 @@ export default function UploadForm() {
       setUploading(true);
       setError(null);
       setDocStatus(null);
-      setCompletedSteps(["upload"]);
+      setActivityLog(["Uploading file..."]);
+      setLiveGraph(null);
+      setStartTime(Date.now());
+      lastStepRef.current = "";
 
       try {
         const formData = new FormData();
@@ -148,6 +228,7 @@ export default function UploadForm() {
         if (!res.ok) throw new Error(await res.text());
 
         const doc = await res.json();
+        setActivityLog((prev) => [...prev, "Upload complete. Starting pipeline..."]);
         setDocStatus({
           id: doc.id,
           originalName: doc.originalName,
@@ -155,12 +236,14 @@ export default function UploadForm() {
           error: null,
           processingStep: "Starting pipeline...",
           notesCount: null,
+          recentNotes: [],
         });
 
         startPolling(doc.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Upload failed");
         setUploading(false);
+        setStartTime(null);
       }
     },
     [router]
@@ -171,6 +254,12 @@ export default function UploadForm() {
     : uploading
       ? 0
       : -1;
+
+  function formatElapsed(s: number): string {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+  }
 
   return (
     <div className="max-w-[560px] mx-auto px-4 py-6 md:px-8 md:py-8">
@@ -222,80 +311,151 @@ export default function UploadForm() {
 
       {/* Processing progress */}
       {docStatus && (
-        <div className="mt-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg p-5">
-          {/* File name */}
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-[15px]">📄</span>
-            <span className="text-[14px] font-medium text-[var(--heading)]">
-              {docStatus.originalName}
-            </span>
-            {docStatus.notesCount != null && docStatus.notesCount > 0 && (
-              <span className="text-[12px] text-[var(--muted)] ml-auto">
-                {docStatus.notesCount} notes
-              </span>
+        <div className="mt-2 space-y-4">
+          {/* Header with file name + elapsed */}
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-[15px]">📄</span>
+                <span className="text-[14px] font-medium text-[var(--heading)]">
+                  {docStatus.originalName}
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                {docStatus.notesCount != null && docStatus.notesCount > 0 && (
+                  <span className="text-[12px] text-[var(--accent)] font-medium">
+                    {docStatus.notesCount} notes
+                  </span>
+                )}
+                {startTime && docStatus.status === "processing" && (
+                  <span className="text-[11px] text-[var(--muted)] tabular-nums">
+                    {formatElapsed(elapsed)}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Pipeline stages — compact */}
+            <div className="space-y-0">
+              {PIPELINE_STAGES.map((stage, idx) => {
+                const isActive = idx === currentStageIdx;
+                const isCompleted = currentStageIdx > idx || docStatus.status === "done";
+                return (
+                  <div key={stage.key} className={`flex items-start gap-3 relative ${isActive ? "animate-pulse" : ""}`}>
+                    {idx < PIPELINE_STAGES.length - 1 && (
+                      <div
+                        className="absolute left-[9px] top-[20px] w-[2px] h-[20px]"
+                        style={{ backgroundColor: isCompleted ? "var(--accent)" : "var(--border)" }}
+                      />
+                    )}
+                    <div className="flex-shrink-0 mt-[2px]">
+                      {isCompleted ? (
+                        <div className="w-5 h-5 rounded-full bg-[var(--accent)] flex items-center justify-center">
+                          <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                      ) : isActive ? (
+                        <div className="w-5 h-5 rounded-full border-2 border-[var(--accent)] flex items-center justify-center">
+                          <div className="w-2 h-2 rounded-full bg-[var(--accent)]" />
+                        </div>
+                      ) : (
+                        <div className="w-5 h-5 rounded-full border-2 border-[var(--border)]" />
+                      )}
+                    </div>
+                    <div className="pb-3 flex-1 min-w-0">
+                      <p className={`text-[13px] leading-tight ${
+                        isActive ? "text-[var(--heading)] font-medium" :
+                        isCompleted ? "text-[var(--text-secondary)]" :
+                        "text-[var(--muted)]"
+                      }`}>
+                        {stage.label}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {docStatus.status === "done" && (
+              <div className="mt-2 p-3 rounded bg-[var(--accent-bg)] text-[var(--accent)] text-[13px]">
+                Processing complete. Redirecting...
+              </div>
             )}
           </div>
 
-          {/* Pipeline stages */}
-          <div className="space-y-0">
-            {PIPELINE_STAGES.map((stage, idx) => {
-              const isActive = idx === currentStageIdx;
-              const isCompleted = currentStageIdx > idx || docStatus.status === "done";
-              const isFuture = idx > currentStageIdx && docStatus.status !== "done";
+          {/* Live graph — appears once notes exist */}
+          {liveGraph && liveGraph.nodes.length > 0 && (
+            <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg overflow-hidden">
+              <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider">
+                  Knowledge Graph
+                </span>
+                <span className="text-[10px] text-[var(--muted)]">
+                  {liveGraph.nodes.length} nodes · {liveGraph.edges.length} edges
+                </span>
+              </div>
+              <div ref={graphContainerRef}>
+                <ForceGraph
+                  data={liveGraph}
+                  onNodeClick={(slug) => router.push(`/notes/${slug}`)}
+                  width={graphWidth}
+                  height={200}
+                  mode="global"
+                  showLegend={false}
+                />
+              </div>
+            </div>
+          )}
 
-              return (
-                <div key={stage.key} className="flex items-start gap-3 relative">
-                  {/* Vertical line */}
-                  {idx < PIPELINE_STAGES.length - 1 && (
-                    <div
-                      className="absolute left-[9px] top-[20px] w-[2px] h-[20px]"
-                      style={{
-                        backgroundColor: isCompleted ? "var(--accent)" : "var(--border)",
-                      }}
-                    />
-                  )}
+          {/* Recent notes — fade in as they appear */}
+          {docStatus.recentNotes.length > 0 && (
+            <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg p-3">
+              <h3 className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider mb-2">
+                Notes Created
+              </h3>
+              <ul className="space-y-1">
+                {docStatus.recentNotes.map((title, i) => (
+                  <li
+                    key={i}
+                    className="text-[12px] text-[var(--text-secondary)] flex items-center gap-2 animate-[fadeIn_0.4s_ease-out]"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] flex-shrink-0" />
+                    <span className="truncate">{title}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-                  {/* Circle indicator */}
-                  <div className="flex-shrink-0 mt-[2px]">
-                    {isCompleted ? (
-                      <div className="w-5 h-5 rounded-full bg-[var(--accent)] flex items-center justify-center">
-                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                        </svg>
-                      </div>
-                    ) : isActive ? (
-                      <div className="w-5 h-5 rounded-full border-2 border-[var(--accent)] flex items-center justify-center">
-                        <div className="w-2 h-2 rounded-full bg-[var(--accent)] animate-pulse" />
-                      </div>
-                    ) : (
-                      <div className="w-5 h-5 rounded-full border-2 border-[var(--border)]" />
-                    )}
+          {/* Activity log */}
+          {activityLog.length > 0 && (
+            <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg overflow-hidden">
+              <div className="px-3 py-2 border-b border-[var(--border)]">
+                <span className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider">
+                  Activity Log
+                </span>
+              </div>
+              <div
+                ref={logRef}
+                className="max-h-[160px] overflow-y-auto p-3 space-y-1"
+              >
+                {activityLog.map((msg, i) => (
+                  <div
+                    key={i}
+                    className="text-[11px] font-mono text-[var(--text-secondary)] leading-relaxed animate-[fadeIn_0.3s_ease-out]"
+                  >
+                    <span className="text-[var(--muted)] mr-2 select-none">{'>'}</span>
+                    {msg}
                   </div>
-
-                  {/* Label + detail */}
-                  <div className="pb-4 flex-1 min-w-0">
-                    <p className={`text-[13px] leading-tight ${
-                      isActive ? "text-[var(--heading)] font-medium" :
-                      isCompleted ? "text-[var(--text-secondary)]" :
-                      "text-[var(--muted)]"
-                    }`}>
-                      {stage.label}
-                    </p>
-                    {isActive && docStatus.processingStep && (
-                      <p className="text-[12px] text-[var(--accent)] mt-0.5 truncate">
-                        {docStatus.processingStep}
-                      </p>
-                    )}
+                ))}
+                {docStatus.status === "processing" && (
+                  <div className="text-[11px] font-mono text-[var(--accent)]">
+                    <span className="text-[var(--muted)] mr-2 select-none">{'>'}</span>
+                    <span className="inline-block w-1.5 h-3 bg-[var(--accent)] animate-pulse" />
                   </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Done message */}
-          {docStatus.status === "done" && (
-            <div className="mt-2 p-3 rounded bg-[var(--accent-bg)] text-[var(--accent)] text-[13px]">
-              Processing complete. Redirecting...
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -306,7 +466,7 @@ export default function UploadForm() {
         <div className="mt-4 p-3 rounded bg-[var(--danger)]/5 border border-[var(--danger)]/20 text-[13px]">
           <p className="text-[var(--danger)]">{error}</p>
           <button
-            onClick={() => { setError(null); setDocStatus(null); setUploading(false); }}
+            onClick={() => { setError(null); setDocStatus(null); setUploading(false); setActivityLog([]); setLiveGraph(null); setStartTime(null); }}
             className="mt-2 px-3 py-1 text-[12px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
           >
             Try again

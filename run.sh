@@ -35,14 +35,35 @@ engine = create_engine(f'sqlite:///{settings.database_url}')
 inspector = inspect(engine)
 existing = inspector.get_table_names()
 if 'notes' not in existing:
-    print('Creating tables...')
+    print('Creating tables from models...')
     Base.metadata.create_all(engine)
+    print('Stamping alembic to latest...')
+    engine.dispose()
+    import subprocess
+    subprocess.run(['python', '-m', 'alembic', 'stamp', 'head'], check=True)
 else:
     print(f'Tables exist: {existing}')
-engine.dispose()
+    # Check if new tables are missing despite alembic thinking it is up to date
+    if 'spaces' not in existing:
+        print('Missing spaces table — resetting alembic version to run migrations...')
+        # Find the last migration that the DB actually has applied
+        if 'note_comments' in existing:
+            stamp_to = 'd4e5f6a7b8c9'
+        elif 'subgraph_nodes' in existing and 'space_id' in [c['name'] for c in inspector.get_columns('notes')]:
+            stamp_to = 'c3d4e5f6a7b8'
+        elif 'subgraph_nodes' in existing:
+            stamp_to = 'b2c3d4e5f6a7'
+        else:
+            stamp_to = 'f65b0e1d2eda'
+        engine.dispose()
+        import subprocess
+        subprocess.run(['python', '-m', 'alembic', 'stamp', stamp_to], check=True)
+        subprocess.run(['python', '-m', 'alembic', 'upgrade', 'head'], check=True)
+    else:
+        engine.dispose()
+        import subprocess
+        subprocess.run(['python', '-m', 'alembic', 'upgrade', 'head'], check=True)
 "
-alembic stamp head 2>&1 || true
-alembic upgrade head 2>&1 || true
 
 # ── Background: sync DB to GCS every 60 seconds ─────────────────────
 (

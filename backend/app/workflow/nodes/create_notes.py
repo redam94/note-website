@@ -17,9 +17,11 @@ from ..progress import set_step
 from ..state import ProcessingState
 
 NOTE_SYSTEM = load_prompt("create_note").format()
+QUALITY_SYSTEM = load_prompt("quality_check").format()
 
 _CONCURRENCY = 6
 _MIN_QUALITY_CHARS = 500  # minimum body length to accept without escalation
+_QUALITY_THRESHOLD = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +360,6 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
 
             # ── Fallback: embed real source text ──────────────────────
             if note_data is None or _is_stub(note_data):
-                # Include actual source material instead of empty stub
                 source_excerpt = section_text[:4000].strip()
                 note_data = {
                     "summary": f"Key concepts from {plan_entry['title']} in {original_name}.",
@@ -375,7 +376,56 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                         f"## See Also\n\n"
                         + "\n".join(f"- [[{t}]]" for t in linkable[:8])
                     ),
+                    "_is_fallback": True,
                 }
+
+            # ── Quality gate: Haiku checks if note is good enough ────
+            content_preview = note_data.get("content", "")[:2000]
+            try:
+                qc_response = await provider.complete(
+                    messages=[{"role": "user", "content": f"Note title: {plan_entry['title']}\n\n{content_preview}"}],
+                    system=QUALITY_SYSTEM,
+                    max_tokens=256,
+                    tier="simple",
+                )
+                qc_match = re.search(r"\{.*\}", qc_response, re.DOTALL)
+                qc = json.loads(qc_match.group()) if qc_match else json.loads(qc_response)
+                score = qc.get("score", 1.0)
+                passed = qc.get("pass", True) and score >= _QUALITY_THRESHOLD
+
+                if not passed and not note_data.get("_is_fallback"):
+                    # Failed quality check — retry with Sonnet using feedback
+                    suggestion = qc.get("suggestion", "Add more depth and structure")
+                    issues = qc.get("issues", [])
+                    logger.info("Quality check failed for %s (%.2f): %s", plan_entry["title"], score, issues)
+
+                    retry_prompt = (
+                        f"{base_prompt}\n\n"
+                        f"IMPORTANT — A quality review found these problems with a previous draft:\n"
+                        f"Issues: {', '.join(issues)}\n"
+                        f"Suggestion: {suggestion}\n\n"
+                        f"Write a substantially better version. Do NOT just describe what the note should cover — "
+                        f"actually explain the concepts with depth, definitions, examples, and formulas."
+                    )
+
+                    try:
+                        retry_response = await provider.complete(
+                            messages=[{"role": "user", "content": retry_prompt}],
+                            system=NOTE_SYSTEM,
+                            max_tokens=4096,
+                            tier="advanced",
+                        )
+                        retry_data = _parse_llm_response(retry_response)
+                        if retry_data and not _is_stub(retry_data):
+                            note_data = retry_data
+                    except Exception as e:
+                        logger.debug("Quality retry failed for %s: %s", plan_entry["title"], e)
+
+            except Exception as e:
+                logger.debug("Quality check failed for %s: %s", plan_entry["title"], e)
+
+            # Remove internal flag
+            note_data.pop("_is_fallback", None)
 
             completed += 1
             await set_step(
