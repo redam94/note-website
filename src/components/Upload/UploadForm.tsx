@@ -211,18 +211,43 @@ export default function UploadForm() {
       setUploading(true);
       setError(null);
       setDocStatus(null);
-      setActivityLog(["Uploading file..."]);
+      setActivityLog(["Uploading... 0%"]);
       setLiveGraph(null);
       setStartTime(Date.now());
       lastStepRef.current = "";
 
       try {
-        const formData = new FormData();
-        formData.append("file", file);
+        const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
+        const sessionId = crypto.randomUUID();
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-        const res = await fetch(apiUrl("/api/documents", spaceRef.current), {
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const chunkBlob = file.slice(start, start + CHUNK_SIZE);
+          const chunkForm = new FormData();
+          chunkForm.append("session_id", sessionId);
+          chunkForm.append("chunk_index", String(i));
+          chunkForm.append("total_chunks", String(totalChunks));
+          chunkForm.append("filename", file.name);
+          chunkForm.append("chunk", chunkBlob, file.name);
+
+          const chunkRes = await fetch(apiUrl("/api/documents/upload-chunk", spaceRef.current), {
+            method: "POST",
+            body: chunkForm,
+          });
+          if (!chunkRes.ok) throw new Error(await chunkRes.text());
+
+          const pct = Math.round(((i + 1) / totalChunks) * 100);
+          setActivityLog([`Uploading... ${pct}%`]);
+        }
+
+        const completeForm = new FormData();
+        completeForm.append("session_id", sessionId);
+        completeForm.append("filename", file.name);
+
+        const res = await fetch(apiUrl("/api/documents/upload-complete", spaceRef.current), {
           method: "POST",
-          body: formData,
+          body: completeForm,
         });
 
         if (!res.ok) throw new Error(await res.text());

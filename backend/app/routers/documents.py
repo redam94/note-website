@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +99,76 @@ async def upload_document(
     else:
         background_tasks.add_task(
             run_processing_pipeline, doc.id, file_path, mime_type, file.filename or "unknown", current_space.id
+        )
+
+    return DocumentResponse.from_row(doc)
+
+
+@router.post("/documents/upload-chunk", status_code=204, dependencies=[Depends(require_admin)])
+async def upload_chunk(
+    session_id: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    filename: str = Form(...),
+    chunk: UploadFile = File(...),
+) -> None:
+    """Receive one chunk of a large file upload. Chunks are appended to a temp file."""
+    tmp_dir = os.path.join(settings.uploads_dir, ".chunks")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, session_id)
+
+    data = await chunk.read()
+    async with aiofiles.open(tmp_path, "ab") as f:
+        await f.write(data)
+
+
+@router.post("/documents/upload-complete", status_code=201, dependencies=[Depends(require_admin)])
+async def upload_complete(
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    filename: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+) -> DocumentResponse:
+    """Finalize a chunked upload: move the assembled file and start processing."""
+    tmp_dir = os.path.join(settings.uploads_dir, ".chunks")
+    tmp_path = os.path.join(tmp_dir, session_id)
+
+    if not os.path.exists(tmp_path):
+        raise HTTPException(status_code=404, detail="Upload session not found")
+
+    os.makedirs(settings.uploads_dir, exist_ok=True)
+    ext = os.path.splitext(filename)[1]
+    dest_filename = f"{uuid.uuid4()}{ext}"
+    dest_path = os.path.join(settings.uploads_dir, dest_filename)
+    os.rename(tmp_path, dest_path)
+
+    mime_type = get_mime_type(filename)
+    now = datetime.now(timezone.utc).isoformat()
+
+    doc = Document(
+        filename=dest_filename,
+        original_name=filename,
+        mime_type=mime_type,
+        status="pending",
+        created_at=now,
+        space_id=current_space.id,
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    if settings.use_redis:
+        from arq import create_pool
+        from arq.connections import RedisSettings
+
+        pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+        await pool.enqueue_job(
+            "process_document_job", doc.id, dest_path, mime_type, filename, current_space.id
+        )
+    else:
+        background_tasks.add_task(
+            run_processing_pipeline, doc.id, dest_path, mime_type, filename, current_space.id
         )
 
     return DocumentResponse.from_row(doc)
