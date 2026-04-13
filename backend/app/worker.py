@@ -18,8 +18,9 @@ async def process_document_job(
     file_path: str,
     mime_type: str,
     original_name: str,
+    space_id: int = 1,
 ):
-    await run_processing_pipeline(document_id, file_path, mime_type, original_name)
+    await run_processing_pipeline(document_id, file_path, mime_type, original_name, space_id=space_id)
 
 
 async def run_processing_pipeline(
@@ -27,6 +28,7 @@ async def run_processing_pipeline(
     file_path: str,
     mime_type: str,
     original_name: str,
+    space_id: int = 1,
 ):
     """Run the pipeline with checkpoint resumption."""
 
@@ -40,6 +42,7 @@ async def run_processing_pipeline(
     else:
         state = {
             "document_id": document_id,
+            "space_id": space_id,
             "file_path": file_path,
             "mime_type": mime_type,
             "original_name": original_name,
@@ -119,7 +122,7 @@ async def resume_interrupted_documents():
         if doc.checkpoint and doc.last_completed_node:
             logger.info("Resuming doc %d from '%s'", doc.id, doc.last_completed_node)
             asyncio.create_task(
-                run_processing_pipeline(doc.id, doc.filename, doc.mime_type, doc.original_name)
+                run_processing_pipeline(doc.id, doc.filename, doc.mime_type, doc.original_name, space_id=doc.space_id)
             )
             resumed += 1
         else:

@@ -257,12 +257,14 @@ async def find_by_tag(
     db: AsyncSession,
     tag: str,
     limit: int = 30,
+    space_id: int | None = None,
 ) -> list[dict]:
     """Find notes whose tags JSON array contains the given tag."""
     pattern = f'%"{tag}"%'
-    result = await db.execute(
-        select(Note).where(Note.tags.like(pattern)).limit(limit)
-    )
+    query = select(Note).where(Note.tags.like(pattern))
+    if space_id is not None:
+        query = query.where(Note.space_id == space_id)
+    result = await db.execute(query.limit(limit))
     return [_note_summary(n) for n in result.scalars().all()]
 
 
@@ -275,6 +277,7 @@ async def grep_notes(
     pattern: str,
     case_sensitive: bool = False,
     limit: int = 20,
+    space_id: int | None = None,
 ) -> list[dict]:
     """Search note content and titles for a text pattern.
 
@@ -283,12 +286,15 @@ async def grep_notes(
     if case_sensitive:
         query = select(Note).where(
             or_(Note.title.contains(pattern), Note.content.contains(pattern))
-        ).limit(limit)
+        )
     else:
         like_pat = f"%{pattern}%"
         query = select(Note).where(
             or_(Note.title.like(like_pat), Note.content.like(like_pat))
-        ).limit(limit)
+        )
+    if space_id is not None:
+        query = query.where(Note.space_id == space_id)
+    query = query.limit(limit)
 
     result = await db.execute(query)
     matches = []
@@ -328,6 +334,7 @@ async def regex_search(
     db: AsyncSession,
     regex: str,
     limit: int = 20,
+    space_id: int | None = None,
 ) -> list[dict]:
     """Search note content using a Python regex pattern.
 
@@ -336,10 +343,13 @@ async def regex_search(
     try:
         compiled = re.compile(regex, re.IGNORECASE)
     except re.error:
-        return await grep_notes(db, regex, limit=limit)
+        return await grep_notes(db, regex, limit=limit, space_id=space_id)
 
     # Load all notes (for regex we need Python-side matching)
-    result = await db.execute(select(Note))
+    query = select(Note)
+    if space_id is not None:
+        query = query.where(Note.space_id == space_id)
+    result = await db.execute(query)
     matches = []
 
     for n in result.scalars().all():
@@ -434,9 +444,12 @@ async def get_note_context(
 # 8.  List all tags in the knowledge base
 # ---------------------------------------------------------------------------
 
-async def list_all_tags(db: AsyncSession) -> list[dict]:
+async def list_all_tags(db: AsyncSession, space_id: int | None = None) -> list[dict]:
     """Return all unique tags with their usage count."""
-    result = await db.execute(select(Note.tags))
+    query = select(Note.tags)
+    if space_id is not None:
+        query = query.where(Note.space_id == space_id)
+    result = await db.execute(query)
     tag_counts: dict[str, int] = {}
     for (tags_raw,) in result.all():
         for tag in _parse_tags(tags_raw):
@@ -456,6 +469,7 @@ async def find_related(
     db: AsyncSession,
     note_id: int,
     limit: int = 10,
+    space_id: int | None = None,
 ) -> list[dict]:
     """Find notes related to a given note by shared tags and graph proximity.
 
@@ -495,7 +509,10 @@ async def find_related(
 
     # Shared tags: 1 point per shared tag
     if note_tags:
-        all_notes = await db.execute(select(Note).where(Note.id != note_id))
+        tag_query = select(Note).where(Note.id != note_id)
+        if space_id is not None:
+            tag_query = tag_query.where(Note.space_id == space_id)
+        all_notes = await db.execute(tag_query)
         for n in all_notes.scalars().all():
             shared = note_tags & set(_parse_tags(n.tags))
             if shared:

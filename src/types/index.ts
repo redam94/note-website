@@ -33,6 +33,14 @@ export interface SearchResult {
   score: number;
 }
 
+export interface Space {
+  id: number;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: string;
+}
+
 export interface NoteWithLinks {
   id: number;
   title: string;

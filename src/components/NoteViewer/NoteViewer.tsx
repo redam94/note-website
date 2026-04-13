@@ -4,6 +4,8 @@ import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 import LocalGraph from "@/components/Graph/LocalGraph";
 import NoteContent from "@/components/NoteContent";
 import type { NoteWithLinks, GraphData } from "@/types";
@@ -64,6 +66,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const router = useRouter();
   const { role } = useAuth();
+  const { spaceSlug } = useSpace();
   const isAdmin = role === "admin";
 
   useEffect(() => {
@@ -71,13 +74,13 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
     setError(null);
     setConfirmDelete(false);
     Promise.all([
-      fetch(`/api/notes/${slug}`).then((r) => (r.ok ? r.json() : Promise.reject("Not found"))),
-      fetch("/api/graph").then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
+      fetch(apiUrl(`/api/notes/${slug}`, spaceSlug)).then((r) => (r.ok ? r.json() : Promise.reject("Not found"))),
+      fetch(apiUrl("/api/graph", spaceSlug)).then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
     ])
       .then(([noteData, graph]) => { setNote(noteData); setGraphData(graph); })
       .catch((err) => setError(typeof err === "string" ? err : "Failed to load note"))
       .finally(() => setLoading(false));
-  }, [slug]);
+  }, [slug, spaceSlug]);
 
   const toc = useMemo(() => (note ? extractToc(note.content) : []), [note]);
   const fmTags = useMemo(() => (note ? extractFrontmatterTags(note.content) : []), [note]);
@@ -88,7 +91,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
     if (!confirmDelete) { setConfirmDelete(true); return; }
     setDeleting(true);
     try {
-      const res = await fetch(`/api/notes/${slug}`, { method: "DELETE" });
+      const res = await fetch(apiUrl(`/api/notes/${slug}`, spaceSlug), { method: "DELETE" });
       if (!res.ok) throw new Error();
       window.dispatchEvent(new Event("sidebar-refresh"));
       router.push("/");

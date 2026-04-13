@@ -17,6 +17,6 @@ async def update_communities(state: ProcessingState) -> ProcessingState:
     new_ids = [n["id"] for n in created_notes if "id" in n]
 
     async with async_session() as db:
-        results = await incremental_update(db, new_ids)
+        results = await incremental_update(db, new_ids, space_id=state["space_id"])
 
     return {**state, "community_updates": results}

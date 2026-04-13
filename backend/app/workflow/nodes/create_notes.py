@@ -414,9 +414,9 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
         folder = plan_entry.get("folder", "")
         folder_id_map = state.get("folder_id_map", {})
         parent_id = folder_id_map.get(folder)
+        parent_title = plan_entry.get("parent_title")
         # Fallback: use parent_title within current document
         if parent_id is None:
-            parent_title = plan_entry.get("parent_title")
             parent_id = slug_map.get(parent_title) if parent_title else None
 
         tags = plan_entry.get("tags", [])
@@ -462,6 +462,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             chapter=chapter,
             page=page,
             summary=note_data.get("summary"),
+            space_id=state["space_id"],
         )
 
         async with async_session() as db:

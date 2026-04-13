@@ -36,17 +36,29 @@ class FullGraph:
     co_reference: dict[tuple[int, int], int]  # (min_id, max_id) -> count
 
 
-async def build_full_graph(db: AsyncSession) -> FullGraph:
+async def build_full_graph(db: AsyncSession, space_id: int | None = None) -> FullGraph:
     """Build the complete graph from all edge sources.
+
+    Args:
+        space_id: If provided, only include notes from this space.
 
     Returns a FullGraph with notes, deduplicated edges, degree map,
     and bidirectional co-reference counts for each node pair.
     """
-    notes_result = await db.execute(select(Note))
+    note_query = select(Note)
+    if space_id is not None:
+        note_query = note_query.where(Note.space_id == space_id)
+    notes_result = await db.execute(note_query)
     all_notes = notes_result.scalars().all()
 
+    note_ids = {n.id for n in all_notes}
+
     edges_result = await db.execute(select(GraphEdge))
-    all_edges = edges_result.scalars().all()
+    # Filter edges to only include those between notes in this space
+    all_edges = [
+        e for e in edges_result.scalars().all()
+        if e.source_id in note_ids and e.target_id in note_ids
+    ] if space_id is not None else edges_result.scalars().all()
 
     # Build title -> id map for wiki-link resolution
     title_to_id: dict[str, int] = {}

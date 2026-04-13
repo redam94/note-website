@@ -5,6 +5,7 @@ from typing import TypedDict
 
 class ProcessingState(TypedDict):
     document_id: int
+    space_id: int
     file_path: str
     mime_type: str
     original_name: str

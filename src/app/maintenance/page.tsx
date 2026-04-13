@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 
 interface AuditData {
   total_notes: number;
@@ -25,12 +27,13 @@ export default function MaintenancePage() {
   const [results, setResults] = useState<string[]>([]);
   const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
   const [clusters, setClusters] = useState<Array<{ id: number; label: string; path?: string | null; level?: number; summary: string | null; member_count: number }>>([]);
+  const { spaceSlug } = useSpace();
 
   async function runAudit() {
     setLoading("audit");
     setResults([]);
     try {
-      const res = await fetch("/api/maintenance/audit");
+      const res = await fetch(apiUrl("/api/maintenance/audit", spaceSlug));
       if (!res.ok) throw new Error();
       setAudit(await res.json());
     } catch { setResults(["Audit failed"]); }
@@ -41,7 +44,7 @@ export default function MaintenancePage() {
     let missCount = 0;
     const poll = setInterval(async () => {
       try {
-        const res = await fetch(`/api/maintenance/jobs/${jobId}`);
+        const res = await fetch(apiUrl(`/api/maintenance/jobs/${jobId}`, spaceSlug));
         if (!res.ok) return;
         const job = await res.json();
 
@@ -86,7 +89,7 @@ export default function MaintenancePage() {
     setLoading("reindex");
     setResults([]);
     try {
-      const res = await fetch("/api/maintenance/reindex", { method: "POST" });
+      const res = await fetch(apiUrl("/api/maintenance/reindex", spaceSlug), { method: "POST" });
       const data = await res.json();
       if (data.job_id) {
         await pollJob(data.job_id, "Reindex");
@@ -98,7 +101,7 @@ export default function MaintenancePage() {
     setLoading("fix-links");
     setResults([]);
     try {
-      const res = await fetch("/api/maintenance/fix-links", { method: "POST" });
+      const res = await fetch(apiUrl("/api/maintenance/fix-links", spaceSlug), { method: "POST" });
       const data = await res.json();
       setResults([`Applied ${data.fixes_applied} fixes across ${data.notes_scanned} notes`]);
     } catch { setResults(["Fix links failed"]); }
@@ -109,7 +112,7 @@ export default function MaintenancePage() {
     setLoading("repair-shallow");
     setResults([]);
     try {
-      const res = await fetch("/api/maintenance/repair-shallow", { method: "POST" });
+      const res = await fetch(apiUrl("/api/maintenance/repair-shallow", spaceSlug), { method: "POST" });
       const data = await res.json();
       if (data.job_id) {
         await pollJob(data.job_id, "Repair");
@@ -121,7 +124,7 @@ export default function MaintenancePage() {
     setLoading(`repair-${noteId}`);
     setRepairResult(null);
     try {
-      const res = await fetch("/api/maintenance/repair", {
+      const res = await fetch(apiUrl("/api/maintenance/repair", spaceSlug), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ note_id: noteId }),
@@ -135,7 +138,7 @@ export default function MaintenancePage() {
     setLoading("cleanup");
     setResults([]);
     try {
-      const res = await fetch("/api/maintenance/cleanup-indexes", { method: "POST" });
+      const res = await fetch(apiUrl("/api/maintenance/cleanup-indexes", spaceSlug), { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setResults([
@@ -154,7 +157,7 @@ export default function MaintenancePage() {
     setResults([]);
     setClusters([]);
     try {
-      const res = await fetch("/api/community/detect", { method: "POST" });
+      const res = await fetch(apiUrl("/api/community/detect", spaceSlug), { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);

@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_admin
 from ..database import get_db
+from ..dependencies import get_current_space
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
+from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.ask import LinkRequest
 from ..services.model_provider import get_provider
@@ -52,13 +54,14 @@ async def detect_link(provider, note_a, note_b) -> dict | None:
 async def detect_links(
     body: LinkRequest,
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ):
-    result = await db.execute(select(Note).where(Note.id == body.noteId))
+    result = await db.execute(select(Note).where(Note.id == body.noteId).where(Note.space_id == current_space.id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
-    all_result = await db.execute(select(Note).where(Note.id != body.noteId))
+    all_result = await db.execute(select(Note).where(Note.id != body.noteId).where(Note.space_id == current_space.id))
     other_notes = all_result.scalars().all()
 
     provider = await get_provider(db)

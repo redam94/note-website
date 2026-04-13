@@ -16,3 +16,6 @@ class SubgraphEdge(Base):
     weight = Column(Float, nullable=False, default=0.0)
     cross_edge_count = Column(Integer, nullable=False, default=0)
     created_at = Column(Text, nullable=False)
+    space_id = Column(
+        Integer, ForeignKey("spaces.id", ondelete="CASCADE"), nullable=False, default=1
+    )

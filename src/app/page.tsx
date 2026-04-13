@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import ForceGraph from "@/components/Graph/ForceGraph";
 import NoteContent from "@/components/NoteContent";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 import type { GraphData } from "@/types";
 
 interface NotePreview {
@@ -21,21 +23,36 @@ interface RootIndex {
   summary: string | null;
 }
 
+interface TocEntry { id: string; text: string; level: number }
+
+function extractToc(content: string): TocEntry[] {
+  const entries: TocEntry[] = [];
+  const stripped = content.replace(/^---[\s\S]*?---\n*/m, "");
+  for (const line of stripped.split("\n")) {
+    const m = line.match(/^(#{2,4})\s+(.+)/);
+    if (m) {
+      const raw = m[2].replace(/\*\*/g, "").replace(/`[^`]*`/g, "").trim();
+      const id = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      entries.push({ id, text: raw, level: m[1].length });
+    }
+  }
+  return entries;
+}
+
 export default function Home() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
   const [notes, setNotes] = useState<NotePreview[]>([]);
   const [rootIndex, setRootIndex] = useState<RootIndex | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showGraph, setShowGraph] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const graphContainerRef = useRef<HTMLDivElement>(null);
+  const [graphDims, setGraphDims] = useState({ width: 300, height: 220 });
   const router = useRouter();
+  const { spaceSlug } = useSpace();
 
   useEffect(() => {
-    // Fetch graph data and try to find root index
     Promise.all([
-      fetch("/api/graph").then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
-      fetch("/api/search?q=Index%3A+Root").then((r) => (r.ok ? r.json() : [])),
+      fetch(apiUrl("/api/graph", spaceSlug)).then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
+      fetch(apiUrl("/api/search", spaceSlug, { q: "Index: Root" })).then((r) => (r.ok ? r.json() : [])),
     ]).then(([graph, searchResults]) => {
       setGraphData(graph);
       setNotes(
@@ -43,28 +60,33 @@ export default function Home() {
           .map((n: any) => ({ id: n.id, title: n.title, slug: n.slug, tags: n.tags || [], level: n.level }))
           .sort((a: NotePreview, b: NotePreview) => a.level - b.level || a.title.localeCompare(b.title))
       );
-      // Find the root index note from search results
       const root = searchResults.find((r: any) => r.title === "Index: Root");
       if (root) {
-        // Fetch full note content
-        fetch(`/api/notes/${root.slug}`)
+        fetch(apiUrl(`/api/notes/${root.slug}`, spaceSlug))
           .then((r) => (r.ok ? r.json() : null))
           .then((note) => {
             if (note) setRootIndex({ slug: note.slug, content: note.content, summary: note.summary });
           });
       }
     }).finally(() => setLoading(false));
-  }, []);
+  }, [spaceSlug]);
 
+  // Measure graph container
   useEffect(() => {
     function update() {
-      if (containerRef.current) setDimensions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight });
+      if (graphContainerRef.current) {
+        setGraphDims({
+          width: graphContainerRef.current.clientWidth,
+          height: 220,
+        });
+      }
     }
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [showGraph]);
+  }, [rootIndex]);
 
+  const toc = useMemo(() => (rootIndex ? extractToc(rootIndex.content) : []), [rootIndex]);
   const topLevel = notes.filter((n) => n.level <= 1);
 
   if (loading) {
@@ -75,55 +97,94 @@ export default function Home() {
     );
   }
 
-  if (showGraph) {
-    return (
-      <div className="h-full flex flex-col p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h1 className="text-lg font-semibold text-[var(--heading)]">Knowledge Graph</h1>
-          <div className="flex items-center gap-3">
-            <span className="text-[12px] text-[var(--muted)]">
-              {graphData.nodes.length} nodes · {graphData.edges.length} edges
-            </span>
-            <button
-              onClick={() => setShowGraph(false)}
-              className="px-3 py-1 text-[12px] bg-[var(--surface)] text-[var(--text-secondary)] rounded border border-[var(--border)] hover:bg-[var(--surface2)] transition-colors"
-            >
-              Back to notes
-            </button>
-          </div>
-        </div>
-        <div ref={containerRef} className="flex-1 min-h-0 rounded-lg border border-[var(--border)] overflow-hidden">
-          <ForceGraph data={graphData} onNodeClick={(slug) => router.push(`/notes/${slug}`)} width={dimensions.width} height={dimensions.height} mode="global" />
-        </div>
-      </div>
-    );
-  }
-
-  // If a root index exists, redirect to its note page
+  // Root index exists — show two-column layout with graph + TOC sidebar
   if (rootIndex) {
     return (
-      <div className="max-w-[720px] mx-auto px-4 py-6 md:px-8 md:py-8">
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <h1 className="text-[28px] font-bold text-[var(--heading)] mb-1">Knowledge Base</h1>
-            <p className="text-[13px] text-[var(--text-secondary)]">
+      <div className="flex min-h-screen">
+        {/* Center content */}
+        <div className="flex-1 max-w-[740px] mx-auto px-4 py-4 md:px-8 md:py-6">
+          <div className="mb-5">
+            <h1 className="text-[26px] font-bold text-[var(--heading)] leading-tight">
+              Knowledge Base
+            </h1>
+            <p className="text-[13px] text-[var(--text-secondary)] mt-1.5">
               {notes.length} notes · {graphData.edges.length} connections
             </p>
           </div>
-          <div className="flex gap-3">
-            <button onClick={() => setShowGraph(true)} className="text-[13px] text-[var(--link)] hover:underline">
-              Graph view
-            </button>
-            <Link href="/search" className="text-[13px] text-[var(--link)] hover:underline">Search</Link>
-            <Link href="/upload" className="text-[13px] text-[var(--link)] hover:underline">Upload</Link>
-          </div>
+
+          <NoteContent content={rootIndex.content} className="text-[15px] leading-[1.8]" />
         </div>
 
-        <NoteContent content={rootIndex.content} />
+        {/* Right sidebar — graph + TOC */}
+        <div className="w-[280px] flex-shrink-0 border-l border-[var(--border)] hidden lg:block">
+          <div className="sticky top-0 h-screen overflow-y-auto p-4 space-y-6">
+            {/* Graph */}
+            {graphData.nodes.length > 0 && (
+              <div>
+                <h3 className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider mb-2">
+                  Knowledge Graph
+                </h3>
+                <div
+                  ref={graphContainerRef}
+                  className="rounded-lg border border-[var(--border)] overflow-hidden"
+                >
+                  <ForceGraph
+                    data={graphData}
+                    onNodeClick={(slug) => router.push(`/notes/${slug}`)}
+                    width={graphDims.width}
+                    height={graphDims.height}
+                    mode="global"
+                    showLegend={false}
+                  />
+                </div>
+                <p className="text-[10px] text-[var(--muted)] mt-1.5 text-center">
+                  {graphData.nodes.length} nodes · {graphData.edges.length} edges
+                </p>
+              </div>
+            )}
+
+            {/* TOC */}
+            {toc.length > 0 && (
+              <div>
+                <h3 className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider mb-2">
+                  Table of Contents
+                </h3>
+                <nav>
+                  {toc.map((entry) => (
+                    <a
+                      key={entry.id}
+                      href={`#${entry.id}`}
+                      className="toc-link"
+                      style={{ paddingLeft: `${(entry.level - 2) * 12}px` }}
+                    >
+                      {entry.text}
+                    </a>
+                  ))}
+                </nav>
+              </div>
+            )}
+
+            {/* Quick links */}
+            <div>
+              <h3 className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider mb-2">
+                Quick Links
+              </h3>
+              <div className="space-y-1.5">
+                <Link href="/search" className="block text-[13px] text-[var(--link)] hover:underline">
+                  Search notes
+                </Link>
+                <Link href="/upload" className="block text-[13px] text-[var(--link)] hover:underline">
+                  Upload document
+                </Link>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
+  // No root index — fallback layout
   return (
     <div className="max-w-[720px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <div className="mb-8">
@@ -140,9 +201,6 @@ export default function Home() {
           Use the graph view or search bar to explore connections across the collection.
         </p>
         <div className="flex gap-3 mt-3">
-          <button onClick={() => setShowGraph(true)} className="text-[13px] text-[var(--link)] hover:underline">
-            Open graph view
-          </button>
           <Link href="/search" className="text-[13px] text-[var(--link)] hover:underline">Search notes</Link>
           <Link href="/upload" className="text-[13px] text-[var(--link)] hover:underline">Upload document</Link>
         </div>
@@ -164,19 +222,6 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {notes.length > topLevel.length && (
-        <div className="mt-10">
-          <h2 className="text-[20px] font-semibold text-[var(--heading)] mb-5 pb-2 border-b border-[var(--border)]">All Notes</h2>
-          <div className="space-y-1">
-            {notes.filter((n) => n.level > 1).map((note) => (
-              <Link key={note.id} href={`/notes/${note.slug}`} className="block py-1.5 text-[14px] text-[var(--text-secondary)] hover:text-[var(--link)] transition-colors">
-                {note.title}
               </Link>
             ))}
           </div>

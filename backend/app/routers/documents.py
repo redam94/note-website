@@ -12,7 +12,9 @@ from ..auth import require_admin
 
 from ..config import settings
 from ..database import get_db
+from ..dependencies import get_current_space
 from ..models.document import Document
+from ..models.space import Space
 from ..schemas.document import DocumentResponse
 from ..worker import run_processing_pipeline
 
@@ -32,8 +34,8 @@ def get_mime_type(filename: str) -> str:
 
 
 @router.get("/documents")
-async def list_documents(db: AsyncSession = Depends(get_db)) -> list[DocumentResponse]:
-    result = await db.execute(select(Document))
+async def list_documents(db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> list[DocumentResponse]:
+    result = await db.execute(select(Document).where(Document.space_id == current_space.id))
     rows = result.scalars().all()
     return [DocumentResponse.from_row(r) for r in rows]
 
@@ -43,6 +45,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> DocumentResponse:
     os.makedirs(settings.uploads_dir, exist_ok=True)
 
@@ -63,6 +66,7 @@ async def upload_document(
         mime_type=mime_type,
         status="pending",
         created_at=now,
+        space_id=current_space.id,
     )
     db.add(doc)
     await db.commit()
@@ -75,11 +79,11 @@ async def upload_document(
 
         pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
         await pool.enqueue_job(
-            "process_document_job", doc.id, file_path, mime_type, file.filename or "unknown"
+            "process_document_job", doc.id, file_path, mime_type, file.filename or "unknown", current_space.id
         )
     else:
         background_tasks.add_task(
-            run_processing_pipeline, doc.id, file_path, mime_type, file.filename or "unknown"
+            run_processing_pipeline, doc.id, file_path, mime_type, file.filename or "unknown", current_space.id
         )
 
     return DocumentResponse.from_row(doc)

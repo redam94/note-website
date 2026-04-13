@@ -2,6 +2,8 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 
 interface DocStatus {
   id: number;
@@ -47,14 +49,18 @@ export default function UploadForm() {
   const [docStatus, setDocStatus] = useState<DocStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [completedSteps, setCompletedSteps] = useState<string[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const spaceRef = useRef<string>("default");
   const router = useRouter();
+  const { spaceSlug } = useSpace();
+  spaceRef.current = spaceSlug;
 
   // On mount: check for in-progress documents and resume polling
   useEffect(() => {
     async function checkInProgress() {
       try {
-        const res = await fetch("/api/documents");
+        const res = await fetch(apiUrl("/api/documents", spaceSlug));
         if (!res.ok) return;
         const docs = await res.json();
         const processing = docs.find(
@@ -84,7 +90,7 @@ export default function UploadForm() {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const statusRes = await fetch("/api/documents");
+        const statusRes = await fetch(apiUrl("/api/documents", spaceRef.current));
         if (!statusRes.ok) return;
         const docs = await statusRes.json();
         const current = docs.find((d: any) => d.id === docId);
@@ -102,6 +108,8 @@ export default function UploadForm() {
         if (current.status === "done") {
           if (pollRef.current) clearInterval(pollRef.current);
           setUploading(false);
+          setToast(`"${current.originalName}" processed — ${current.notesCount || 0} notes created`);
+          setTimeout(() => setToast(null), 5000);
           window.dispatchEvent(new Event("sidebar-refresh"));
           setTimeout(() => router.push("/"), 2500);
         } else if (current.status === "error") {
@@ -132,7 +140,7 @@ export default function UploadForm() {
         const formData = new FormData();
         formData.append("file", file);
 
-        const res = await fetch("/api/documents", {
+        const res = await fetch(apiUrl("/api/documents", spaceRef.current), {
           method: "POST",
           body: formData,
         });
@@ -302,6 +310,21 @@ export default function UploadForm() {
             className="mt-2 px-3 py-1 text-[12px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
           >
             Try again
+          </button>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm px-4 py-3 bg-[var(--accent)] text-white text-[13px] rounded-lg shadow-lg flex items-center gap-3 animate-[slideUp_0.3s_ease-out]">
+          <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          </svg>
+          <span>{toast}</span>
+          <button onClick={() => setToast(null)} className="ml-auto flex-shrink-0 opacity-70 hover:opacity-100">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </button>
         </div>
       )}

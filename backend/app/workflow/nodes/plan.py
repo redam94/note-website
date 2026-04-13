@@ -89,15 +89,15 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
 
     # Fetch existing tags, note titles, and topic tree from DB
     async with async_session() as db:
-        tags_result = await db.execute(select(Note.tags))
+        tags_result = await db.execute(select(Note.tags).where(Note.space_id == state["space_id"]))
         all_tags_raw = tags_result.scalars().all()
 
-        titles_result = await db.execute(select(Note.title))
+        titles_result = await db.execute(select(Note.title).where(Note.space_id == state["space_id"]))
         existing_titles = [t for t in titles_result.scalars().all()]
 
         # Query existing index notes for the topic tree
         index_result = await db.execute(
-            select(Note).where(Note.title.like("Index: %"))
+            select(Note).where(Note.title.like("Index: %")).where(Note.space_id == state["space_id"])
         )
         index_notes = index_result.scalars().all()
 

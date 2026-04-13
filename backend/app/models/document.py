@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Text
+from sqlalchemy import Column, ForeignKey, Integer, Text
 
 from .base import Base
 
@@ -18,3 +18,6 @@ class Document(Base):
     checkpoint = Column(Text, nullable=True)  # JSON-serialized pipeline state for resumption
     last_completed_node = Column(Text, nullable=True)  # e.g., "outline", "plan", "create_notes"
     created_at = Column(Text, nullable=False)
+    space_id = Column(
+        Integer, ForeignKey("spaces.id", ondelete="CASCADE"), nullable=False, default=1
+    )

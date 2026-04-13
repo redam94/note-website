@@ -4,7 +4,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
-import type { GraphNode, GraphEdgeData } from "@/types";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
+import type { GraphNode, GraphEdgeData, Space } from "@/types";
 
 interface TreeNode {
   id: number;
@@ -24,7 +26,10 @@ export default function Sidebar() {
   const pathname = usePathname();
   const prevPathRef = useRef(pathname);
   const { role, logout } = useAuth();
+  const { spaceSlug, spaces, setSpace, refreshSpaces } = useSpace();
   const isAdmin = role === "admin";
+  const [showNewSpace, setShowNewSpace] = useState(false);
+  const [newSpaceName, setNewSpaceName] = useState("");
 
   // When pathname changes, expand ancestors of the active note
   useEffect(() => {
@@ -75,17 +80,17 @@ export default function Sidebar() {
     findAndExpand(tree);
   }, [pathname, tree]);
 
-  // Initial fetch + listen for explicit refresh events
+  // Re-fetch tree when space changes
   useEffect(() => {
     fetchTree();
     const handler = () => fetchTree();
     window.addEventListener(REFRESH_EVENT, handler);
     return () => window.removeEventListener(REFRESH_EVENT, handler);
-  }, []);
+  }, [spaceSlug]);
 
   async function fetchTree() {
     try {
-      const res = await fetch("/api/graph");
+      const res = await fetch(apiUrl("/api/graph", spaceSlug));
       if (!res.ok) return;
       const data = await res.json();
       const nodes: GraphNode[] = data.nodes;
@@ -291,6 +296,91 @@ export default function Sidebar() {
 
   return (
     <aside className="w-72 h-full flex flex-col bg-[var(--surface)] border-r border-[var(--border)] overflow-hidden flex-shrink-0">
+      {/* Space selector */}
+      <div className="px-3 pt-3 pb-0">
+        <div className="flex items-center gap-1">
+          <select
+            value={spaceSlug}
+            onChange={(e) => setSpace(e.target.value)}
+            className="flex-1 min-w-0 text-[12px] px-2 py-1 bg-[var(--bg)] border border-[var(--border)] rounded text-[var(--text-secondary)] focus:outline-none focus:border-[var(--accent-light)] transition-colors cursor-pointer"
+          >
+            {spaces.map((s) => (
+              <option key={s.slug} value={s.slug}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          {isAdmin && (
+            <>
+              <button
+                onClick={() => setShowNewSpace(!showNewSpace)}
+                className="flex-shrink-0 w-6 h-6 flex items-center justify-center text-[var(--muted)] hover:text-[var(--accent)] transition-colors rounded hover:bg-[var(--surface2)]"
+                title="New space"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
+              {spaceSlug !== "default" && (
+                <button
+                  onClick={async () => {
+                    if (!confirm(`Delete space "${spaces.find(s => s.slug === spaceSlug)?.name}"? All its notes will be permanently deleted.`)) return;
+                    const res = await fetch(`/api/spaces/${spaceSlug}`, { method: "DELETE" });
+                    if (res.ok) {
+                      setSpace("default");
+                      await refreshSpaces();
+                    }
+                  }}
+                  className="flex-shrink-0 w-6 h-6 flex items-center justify-center text-[var(--muted)] hover:text-[var(--danger)] transition-colors rounded hover:bg-[var(--surface2)]"
+                  title="Delete space"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        {showNewSpace && isAdmin && (
+          <form
+            className="mt-2 flex gap-1"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const name = newSpaceName.trim();
+              if (!name) return;
+              const res = await fetch("/api/spaces", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name }),
+              });
+              if (res.ok) {
+                const created = await res.json();
+                await refreshSpaces();
+                setSpace(created.slug);
+                setNewSpaceName("");
+                setShowNewSpace(false);
+              }
+            }}
+          >
+            <input
+              type="text"
+              value={newSpaceName}
+              onChange={(e) => setNewSpaceName(e.target.value)}
+              placeholder="Space name..."
+              autoFocus
+              className="flex-1 min-w-0 text-[12px] px-2 py-1 bg-[var(--bg)] border border-[var(--border)] rounded text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent-light)]"
+            />
+            <button
+              type="submit"
+              className="flex-shrink-0 px-2 py-1 text-[11px] font-medium bg-[var(--accent)] text-white rounded hover:opacity-90 transition-opacity"
+            >
+              Create
+            </button>
+          </form>
+        )}
+      </div>
+
       {/* Title */}
       <div className="px-4 pt-5 pb-3">
         <Link href="/" className="text-lg font-semibold text-[var(--heading)] hover:text-[var(--accent)] transition-colors">

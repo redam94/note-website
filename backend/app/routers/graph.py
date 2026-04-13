@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
+from ..dependencies import get_current_space
+from ..models.space import Space
 from ..models.subgraph_node import SubgraphNode
 from ..models.subgraph_edge import SubgraphEdge
 from ..schemas.graph import GraphData, GraphEdgeData, GraphNode
@@ -17,8 +19,9 @@ router = APIRouter(prefix="/api")
 async def get_graph(
     db: AsyncSession = Depends(get_db),
     include_clusters: bool = Query(False),
+    current_space: Space = Depends(get_current_space),
 ) -> GraphData:
-    graph = await build_full_graph(db)
+    graph = await build_full_graph(db, space_id=current_space.id)
 
     edge_list = [
         GraphEdgeData(
@@ -45,7 +48,9 @@ async def get_graph(
         )
 
     if include_clusters:
-        clusters_result = await db.execute(select(SubgraphNode))
+        clusters_result = await db.execute(
+            select(SubgraphNode).where(SubgraphNode.space_id == current_space.id)
+        )
         clusters = clusters_result.scalars().all()
         for c in clusters:
             member_ids = json.loads(c.member_node_ids) if c.member_node_ids else []
@@ -64,7 +69,9 @@ async def get_graph(
                 )
             )
 
-        cluster_edges_result = await db.execute(select(SubgraphEdge))
+        cluster_edges_result = await db.execute(
+            select(SubgraphEdge).where(SubgraphEdge.space_id == current_space.id)
+        )
         for ce in cluster_edges_result.scalars().all():
             edge_list.append(
                 GraphEdgeData(

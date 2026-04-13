@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_admin
 from ..database import get_db
+from ..dependencies import get_current_space
 from ..models.note import Note
+from ..models.space import Space
 from ..models.subgraph_node import SubgraphNode
 from ..schemas.community import (
     ClusterDetailResponse,
@@ -28,9 +30,10 @@ router = APIRouter(prefix="/api/community")
 @router.post("/detect", dependencies=[Depends(require_admin)])
 async def detect_communities_endpoint(
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> CommunityDetectionResponse:
     """Trigger full community detection. Clears and rebuilds all clusters."""
-    clusters = await run_community_detection(db)
+    clusters = await run_community_detection(db, space_id=current_space.id)
     return CommunityDetectionResponse(
         clusters=[
             ClusterResponse(
@@ -51,9 +54,10 @@ async def detect_communities_endpoint(
 @router.get("/clusters")
 async def list_clusters(
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> list[ClusterResponse]:
     """List all subgraph clusters."""
-    result = await db.execute(select(SubgraphNode))
+    result = await db.execute(select(SubgraphNode).where(SubgraphNode.space_id == current_space.id))
     clusters = result.scalars().all()
     return [
         ClusterResponse(
@@ -73,10 +77,11 @@ async def list_clusters(
 async def get_cluster(
     cluster_id: int,
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> ClusterDetailResponse:
     """Get a single cluster with its member notes."""
     result = await db.execute(
-        select(SubgraphNode).where(SubgraphNode.id == cluster_id)
+        select(SubgraphNode).where(SubgraphNode.id == cluster_id).where(SubgraphNode.space_id == current_space.id)
     )
     cluster = result.scalar_one_or_none()
     if not cluster:
@@ -107,9 +112,10 @@ async def get_cluster(
 async def incremental_update_endpoint(
     body: IncrementalUpdateRequest,
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> IncrementalUpdateResponse:
     """Incrementally update clusters for specified note IDs."""
-    results = await incremental_update(db, body.note_ids)
+    results = await incremental_update(db, body.note_ids, space_id=current_space.id)
     return IncrementalUpdateResponse(
         message=f"Processed {len(body.note_ids)} notes",
         details=results,

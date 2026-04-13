@@ -17,3 +17,6 @@ class SubgraphNode(Base):
     summary = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False)
     updated_at = Column(Text, nullable=False)
+    space_id = Column(
+        Integer, ForeignKey("spaces.id", ondelete="CASCADE"), nullable=False, default=1
+    )

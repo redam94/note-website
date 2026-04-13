@@ -19,8 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_admin
 from ..database import async_session, get_db
+from ..dependencies import get_current_space
+from ..models.document import Document
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
+from ..models.space import Space
 from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
 from ..services.model_provider import get_provider
@@ -85,11 +88,18 @@ async def get_job_status(job_id: str) -> JobStatus:
 
 
 @router.get("/audit")
-async def audit_vault(db: AsyncSession = Depends(get_db)) -> AuditResult:
-    result = await db.execute(select(Note))
+async def audit_vault(db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> AuditResult:
+    result = await db.execute(select(Note).where(Note.space_id == current_space.id))
     all_notes = result.scalars().all()
 
-    edges_result = await db.execute(select(GraphEdge))
+    # Get edges that involve notes in this space
+    space_note_ids_result = await db.execute(select(Note.id).where(Note.space_id == current_space.id))
+    space_note_ids = set(space_note_ids_result.scalars().all())
+    edges_result = await db.execute(
+        select(GraphEdge).where(
+            or_(GraphEdge.source_id.in_(space_note_ids), GraphEdge.target_id.in_(space_note_ids))
+        )
+    )
     all_edges = edges_result.scalars().all()
 
     note_ids = {n.id for n in all_notes}
@@ -169,13 +179,14 @@ async def audit_vault(db: AsyncSession = Depends(get_db)) -> AuditResult:
 async def repair_note(
     body: RepairRequest,
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> RepairResult:
-    result = await db.execute(select(Note).where(Note.id == body.note_id))
+    result = await db.execute(select(Note).where(Note.id == body.note_id).where(Note.space_id == current_space.id))
     note = result.scalar_one_or_none()
     if not note:
         return RepairResult(note_id=body.note_id, title="Not found", changes=[], new_links=[])
 
-    titles_result = await db.execute(select(Note.title).where(Note.id != note.id))
+    titles_result = await db.execute(select(Note.title).where(Note.id != note.id).where(Note.space_id == current_space.id))
     all_titles = [t for (t,) in titles_result.all()]
 
     # Get context from related notes (neighbors) for enrichment
@@ -281,8 +292,8 @@ async def repair_note(
 
 
 @router.post("/fix-links")
-async def fix_cross_references(db: AsyncSession = Depends(get_db)) -> dict:
-    result = await db.execute(select(Note))
+async def fix_cross_references(db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> dict:
+    result = await db.execute(select(Note).where(Note.space_id == current_space.id))
     all_notes = result.scalars().all()
     title_to_note = {n.title: n for n in all_notes}
 
@@ -316,24 +327,24 @@ async def fix_cross_references(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 @router.post("/reindex")
-async def reindex_vault(background_tasks: BackgroundTasks) -> dict:
+async def reindex_vault(background_tasks: BackgroundTasks, current_space: Space = Depends(get_current_space)) -> dict:
     job_id = f"reindex-{datetime.now(timezone.utc).strftime('%H%M%S')}"
     _jobs[job_id] = {"job_id": job_id, "status": "running", "progress": "Starting...", "result": None}
-    background_tasks.add_task(_run_reindex, job_id)
+    background_tasks.add_task(_run_reindex, job_id, current_space.id)
     return {"job_id": job_id, "status": "started"}
 
 
-async def _run_reindex(job_id: str):
+async def _run_reindex(job_id: str, space_id: int):
     try:
         async with async_session() as db:
-            result = await db.execute(select(Note))
+            result = await db.execute(select(Note).where(Note.space_id == space_id))
             all_notes = result.scalars().all()
 
         # Pass 0: Load community detection clusters to inform folder assignment
         _jobs[job_id]["progress"] = "Loading community clusters..."
         cluster_folder_map: dict[int, str] = {}  # note_id -> cluster-derived folder
         async with async_session() as db:
-            clusters_result = await db.execute(select(SubgraphNode))
+            clusters_result = await db.execute(select(SubgraphNode).where(SubgraphNode.space_id == space_id))
             clusters = clusters_result.scalars().all()
 
         if clusters:
@@ -370,7 +381,7 @@ async def _run_reindex(job_id: str):
 
         async with async_session() as db:
             provider = await get_provider(db)
-            slugs_result = await db.execute(select(Note.slug))
+            slugs_result = await db.execute(select(Note.slug).where(Note.space_id == space_id))
             existing_slugs = set(slugs_result.scalars().all())
             existing_indexes: dict[str, Note] = {}
             for n in all_notes:
@@ -422,7 +433,7 @@ async def _run_reindex(job_id: str):
 
             async with async_session() as db:
                 if folder_path in existing_indexes:
-                    existing = await db.execute(select(Note).where(Note.title == index_title))
+                    existing = await db.execute(select(Note).where(Note.title == index_title).where(Note.space_id == space_id))
                     idx_note = existing.scalar_one_or_none()
                     if idx_note:
                         idx_note.content = full_content
@@ -449,6 +460,7 @@ async def _run_reindex(job_id: str):
                         level=0,
                         created_at=now.isoformat(),
                         summary=index_data.get("summary"),
+                        space_id=space_id,
                     )
                     db.add(new_note)
                     await db.commit()
@@ -481,7 +493,7 @@ async def _run_reindex(job_id: str):
         cleaned = 0
         async with async_session() as db:
             idx_result = await db.execute(
-                select(Note).where(Note.title.like("Index: %"))
+                select(Note).where(Note.title.like("Index: %")).where(Note.space_id == space_id)
             )
             all_indexes = idx_result.scalars().all()
             all_index_ids = {n.id for n in all_indexes}
@@ -513,7 +525,7 @@ async def _run_reindex(job_id: str):
         _jobs[job_id]["progress"] = "Ensuring Questions folder..."
         async with async_session() as db:
             q_idx_result = await db.execute(
-                select(Note).where(Note.title == "Index: Questions")
+                select(Note).where(Note.title == "Index: Questions").where(Note.space_id == space_id)
             )
             q_idx = q_idx_result.scalar_one_or_none()
             if not q_idx:
@@ -530,6 +542,7 @@ async def _run_reindex(job_id: str):
                     slug=q_slug, tags=json.dumps(["type/index"]),
                     level=0, created_at=now.isoformat(),
                     summary="Saved Q&A answers",
+                    space_id=space_id,
                 )
                 db.add(q_idx)
                 await db.commit()
@@ -539,7 +552,7 @@ async def _run_reindex(job_id: str):
 
             # Re-parent Q&A notes into Questions folder
             qa_result = await db.execute(
-                select(Note).where(Note.title.like("Q: %"))
+                select(Note).where(Note.title.like("Q: %")).where(Note.space_id == space_id)
             )
             qa_reparented = 0
             for qa_note in qa_result.scalars().all():
@@ -556,7 +569,7 @@ async def _run_reindex(job_id: str):
             # Find all root-level index notes (no parent)
             root_children_result = await db.execute(
                 select(Note).where(
-                    and_(Note.parent_id.is_(None), Note.title.like("Index: %"), Note.title != "Index: Root")
+                    and_(Note.parent_id.is_(None), Note.title.like("Index: %"), Note.title != "Index: Root", Note.space_id == space_id)
                 )
             )
             root_children = root_children_result.scalars().all()
@@ -568,6 +581,7 @@ async def _run_reindex(job_id: str):
                         Note.parent_id.is_(None),
                         ~Note.title.like("Index: %"),
                         Note.title != "Index: Root",
+                        Note.space_id == space_id,
                     )
                 )
             )
@@ -591,7 +605,7 @@ async def _run_reindex(job_id: str):
             root_fm = f"---\ntitle: \"Index: Root\"\ntags:\n  - type/index\ndate_updated: {now.strftime('%Y-%m-%d')}\nconcept_count: {len(all_root_items)}\n---"
             root_content = f"{root_fm}\n\n# Knowledge Base\n\n{root_data.get('content', '')}"
 
-            root_result = await db.execute(select(Note).where(Note.title == "Index: Root"))
+            root_result = await db.execute(select(Note).where(Note.title == "Index: Root").where(Note.space_id == space_id))
             root_note = root_result.scalar_one_or_none()
 
             if root_note:
@@ -612,6 +626,7 @@ async def _run_reindex(job_id: str):
                     tags=json.dumps(["type/index"]),
                     level=0, created_at=now.isoformat(),
                     summary=root_data.get("summary"),
+                    space_id=space_id,
                 )
                 db.add(root_note)
                 await db.commit()
@@ -640,10 +655,10 @@ async def _run_reindex(job_id: str):
 
 
 @router.post("/cleanup-indexes")
-async def cleanup_orphaned_indexes(db: AsyncSession = Depends(get_db)) -> dict:
+async def cleanup_orphaned_indexes(db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> dict:
     """Remove index notes that have no children (orphaned by re-parenting)."""
     idx_result = await db.execute(
-        select(Note).where(Note.title.like("Index: %"))
+        select(Note).where(Note.title.like("Index: %")).where(Note.space_id == current_space.id)
     )
     all_indexes = idx_result.scalars().all()
 
@@ -670,17 +685,17 @@ async def cleanup_orphaned_indexes(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 @router.post("/repair-shallow")
-async def repair_shallow_notes(background_tasks: BackgroundTasks) -> dict:
+async def repair_shallow_notes(background_tasks: BackgroundTasks, current_space: Space = Depends(get_current_space)) -> dict:
     job_id = f"repair-{datetime.now(timezone.utc).strftime('%H%M%S')}"
     _jobs[job_id] = {"job_id": job_id, "status": "running", "progress": "Finding shallow notes...", "result": None}
-    background_tasks.add_task(_run_repair_shallow, job_id)
+    background_tasks.add_task(_run_repair_shallow, job_id, current_space.id)
     return {"job_id": job_id, "status": "started"}
 
 
-async def _run_repair_shallow(job_id: str):
+async def _run_repair_shallow(job_id: str, space_id: int):
     try:
         async with async_session() as db:
-            result = await db.execute(select(Note))
+            result = await db.execute(select(Note).where(Note.space_id == space_id))
             all_notes = result.scalars().all()
 
         shallow = []

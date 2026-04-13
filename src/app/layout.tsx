@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar/Sidebar";
 import AuthProvider from "@/components/AuthProvider";
+import { SpaceProvider } from "@/contexts/SpaceContext";
 import MobileShell from "@/components/MobileShell";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -27,9 +28,11 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <AuthProvider>
-          <MobileShell sidebar={<Sidebar />}>
-            {children}
-          </MobileShell>
+          <SpaceProvider>
+            <MobileShell sidebar={<Sidebar />}>
+              {children}
+            </MobileShell>
+          </SpaceProvider>
         </AuthProvider>
       </body>
     </html>

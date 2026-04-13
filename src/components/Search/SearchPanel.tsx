@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 import AnswerView from "./AnswerView";
 
 interface SmartResult {
@@ -53,6 +55,7 @@ export default function SearchPanel({
   const [loading, setLoading] = useState(false);
   const [answering, setAnswering] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { spaceSlug } = useSpace();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -81,13 +84,13 @@ export default function SearchPanel({
     try {
       // Try AI-powered smart search first
       let res = await fetch(
-        `/api/search/smart?q=${encodeURIComponent(searchQuery)}`
+        apiUrl("/api/search/smart", spaceSlug, { q: searchQuery })
       );
 
       // If forbidden (no API key), fall back to graph-powered enhanced search
       if (res.status === 403) {
         res = await fetch(
-          `/api/search/enhanced?q=${encodeURIComponent(searchQuery)}`
+          apiUrl("/api/search/enhanced", spaceSlug, { q: searchQuery })
         );
       }
 
@@ -113,7 +116,7 @@ export default function SearchPanel({
     setKeywordResults([]);
     setAnswer("");
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      const res = await fetch(apiUrl("/api/search", spaceSlug, { q: query }));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       try {
@@ -136,7 +139,7 @@ export default function SearchPanel({
     const STATUS_PREFIX = "<<STATUS>>";
 
     try {
-      const res = await fetch("/api/ask", {
+      const res = await fetch(apiUrl("/api/ask", spaceSlug), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: query }),

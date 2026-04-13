@@ -28,7 +28,7 @@ async def insert_links(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
-        result = await db.execute(select(Note.id, Note.title, Note.slug))
+        result = await db.execute(select(Note.id, Note.title, Note.slug).where(Note.space_id == state["space_id"]))
         all_notes_data = result.all()
 
     all_titles = list({row.title for row in all_notes_data})

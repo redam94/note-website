@@ -11,6 +11,7 @@ interface ForceGraphProps {
   width?: number;
   height?: number;
   mode?: "local" | "global";
+  showLegend?: boolean;
 }
 
 interface SimNode extends d3.SimulationNodeDatum, GraphNode {}
@@ -64,6 +65,7 @@ export default function ForceGraph({
   width = 800,
   height = 600,
   mode = "global",
+  showLegend = true,
 }: ForceGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredNode, setHoveredNode] = useState<number | null>(null);
@@ -229,14 +231,16 @@ export default function ForceGraph({
   return (
     <div className="relative w-full h-full overflow-hidden bg-[var(--bg)]">
       <svg ref={svgRef} width={width} height={height} className="w-full h-full" viewBox={`0 0 ${width} ${height}`} />
-      <div className="absolute bottom-3 left-3 bg-[var(--surface)]/95 rounded-md p-2 text-xs space-y-1 border border-[var(--border)]">
-        {Object.entries(NODE_TYPE_COLORS).map(([type, color]) => (
-          <div key={type} className="flex items-center gap-2">
-            <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
-            <span className="text-[var(--text-secondary)]">{type}</span>
-          </div>
-        ))}
-      </div>
+      {showLegend && (
+        <div className="absolute bottom-3 left-3 bg-[var(--surface)]/95 rounded-md p-2 text-xs space-y-1 border border-[var(--border)]">
+          {Object.entries(NODE_TYPE_COLORS).map(([type, color]) => (
+            <div key={type} className="flex items-center gap-2">
+              <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+              <span className="text-[var(--text-secondary)]">{type}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -24,3 +24,6 @@ class Note(Base):
     cluster_id = Column(
         Integer, ForeignKey("subgraph_nodes.id", ondelete="SET NULL"), nullable=True
     )
+    space_id = Column(
+        Integer, ForeignKey("spaces.id", ondelete="CASCADE"), nullable=False, default=1
+    )

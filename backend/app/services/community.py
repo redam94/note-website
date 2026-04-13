@@ -199,12 +199,12 @@ def _group_partition(partition: dict[int, int]) -> dict[int, list[int]]:
 # 5. Full hierarchical community detection pipeline
 # ---------------------------------------------------------------------------
 
-async def run_community_detection(db: AsyncSession) -> list[dict]:
+async def run_community_detection(db: AsyncSession, space_id: int = 1) -> list[dict]:
     """Run hierarchical community detection: detect, label, persist.
 
     Returns list of created cluster dicts with id, label, path, member_count.
     """
-    graph = await build_full_graph(db)
+    graph = await build_full_graph(db, space_id=space_id)
 
     if not graph.edges:
         return []
@@ -224,10 +224,10 @@ async def run_community_detection(db: AsyncSession) -> list[dict]:
     provider = await get_provider(db)
     now = datetime.now(timezone.utc).isoformat()
 
-    # Clear existing subgraph data
-    await db.execute(delete(SubgraphEdge))
-    await db.execute(delete(SubgraphNode))
-    await db.execute(update(Note).values(cluster_id=None))
+    # Clear existing subgraph data for this space
+    await db.execute(delete(SubgraphEdge).where(SubgraphEdge.space_id == space_id))
+    await db.execute(delete(SubgraphNode).where(SubgraphNode.space_id == space_id))
+    await db.execute(update(Note).where(Note.space_id == space_id).values(cluster_id=None))
     await db.flush()
 
     # Label each cluster with concurrency control
@@ -278,6 +278,7 @@ async def run_community_detection(db: AsyncSession) -> list[dict]:
             summary=r["summary"],
             created_at=now,
             updated_at=now,
+            space_id=space_id,
         )
         db.add(cluster)
         await db.flush()
@@ -324,6 +325,7 @@ async def run_community_detection(db: AsyncSession) -> list[dict]:
             weight=float(count),
             cross_edge_count=count,
             created_at=now,
+            space_id=space_id,
         )
         db.add(ce)
 
@@ -339,6 +341,7 @@ async def incremental_update(
     db: AsyncSession,
     new_note_ids: list[int],
     threshold: int = 3,
+    space_id: int = 1,
 ) -> list[dict]:
     """Incrementally update clusters when new notes are added."""
     if not new_note_ids:
@@ -346,11 +349,13 @@ async def incremental_update(
 
     from ..models.graph_edge import GraphEdge
 
-    clusters_result = await db.execute(select(SubgraphNode))
+    clusters_result = await db.execute(
+        select(SubgraphNode).where(SubgraphNode.space_id == space_id)
+    )
     clusters = clusters_result.scalars().all()
 
     if not clusters:
-        return await run_community_detection(db)
+        return await run_community_detection(db, space_id=space_id)
 
     cluster_members: dict[int, set[int]] = {}
     for c in clusters:
@@ -423,7 +428,7 @@ async def incremental_update(
 
     if unabsorbed:
         await db.commit()
-        return await run_community_detection(db)
+        return await run_community_detection(db, space_id=space_id)
 
     await db.commit()
     return [{"absorbed": absorbed}]

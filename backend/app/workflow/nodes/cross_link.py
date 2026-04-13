@@ -31,7 +31,7 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
-        result = await db.execute(select(Note))
+        result = await db.execute(select(Note).where(Note.space_id == state["space_id"]))
         all_notes = result.scalars().all()
 
     existing_notes = [n for n in all_notes if n.id not in new_ids]

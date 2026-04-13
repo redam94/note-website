@@ -9,16 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_admin
 from ..database import get_db
+from ..dependencies import get_current_space
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
+from ..models.space import Space
 from ..schemas.note import LinkInfo, NoteWithLinks
 
 router = APIRouter(prefix="/api")
 
 
 @router.get("/notes/{slug}")
-async def get_note(slug: str, db: AsyncSession = Depends(get_db)) -> NoteWithLinks:
-    result = await db.execute(select(Note).where(Note.slug == slug))
+async def get_note(slug: str, db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> NoteWithLinks:
+    result = await db.execute(select(Note).where(Note.slug == slug).where(Note.space_id == current_space.id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -32,7 +34,7 @@ async def get_note(slug: str, db: AsyncSession = Depends(get_db)) -> NoteWithLin
     edges = edges_result.scalars().all()
 
     # Get all notes for resolving links
-    all_notes_result = await db.execute(select(Note))
+    all_notes_result = await db.execute(select(Note).where(Note.space_id == current_space.id))
     all_notes = all_notes_result.scalars().all()
     note_map = {n.id: n for n in all_notes}
 
@@ -92,7 +94,7 @@ async def get_note(slug: str, db: AsyncSession = Depends(get_db)) -> NoteWithLin
 
 
 @router.delete("/notes/{slug}", dependencies=[Depends(require_admin)])
-async def delete_note(slug: str, db: AsyncSession = Depends(get_db)):
+async def delete_note(slug: str, db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)):
     """Delete a note and clean up all dead cross-links.
 
     This:
@@ -103,7 +105,7 @@ async def delete_note(slug: str, db: AsyncSession = Depends(get_db)):
     3. Clears parent_id on child notes (re-parents them to this note's parent).
     4. Removes the note.
     """
-    result = await db.execute(select(Note).where(Note.slug == slug))
+    result = await db.execute(select(Note).where(Note.slug == slug).where(Note.space_id == current_space.id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -128,7 +130,7 @@ async def delete_note(slug: str, db: AsyncSession = Depends(get_db)):
 
     # 3. Clean up wiki-links in other notes' content
     #    Remove [[Note Title]], [[Note Title|display]], and broken links
-    all_notes_result = await db.execute(select(Note).where(Note.id != note_id))
+    all_notes_result = await db.execute(select(Note).where(Note.id != note_id).where(Note.space_id == current_space.id))
     for other_note in all_notes_result.scalars().all():
         content = other_note.content
         if note_title not in content:

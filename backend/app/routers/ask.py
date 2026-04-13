@@ -13,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import AuthUser, require_admin, require_user_with_key
 from ..database import get_db
+from ..dependencies import get_current_space
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
+from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.ask import AskRequest
 from ..services.graph_search import (
@@ -161,6 +163,7 @@ async def _retrieve_notes(
 async def ask_knowledge_base(
     body: AskRequest,
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ):
     if not body.question:
         raise HTTPException(status_code=400, detail="No question provided")
@@ -174,7 +177,7 @@ async def ask_knowledge_base(
             pass  # Can't yield from nested async — status updates come from yield below
 
         # Run retrieval (we yield status updates inline)
-        all_result = await db.execute(select(Note))
+        all_result = await db.execute(select(Note).where(Note.space_id == current_space.id))
         all_notes = all_result.scalars().all()
 
         if not all_notes:
@@ -258,7 +261,7 @@ async def ask_knowledge_base(
         if len(collected_ids) < 5:
             for w in [w for w in body.question.lower().split() if len(w) > 3][:3]:
                 result = await db.execute(
-                    select(Note).where(
+                    select(Note).where(Note.space_id == current_space.id).where(
                         or_(Note.title.like(f"%{w}%"), Note.content.like(f"%{w}%"))
                     ).limit(6)
                 )
@@ -325,6 +328,7 @@ class SaveAnswerRequest(BaseModel):
 async def save_answer(
     body: SaveAnswerRequest,
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ):
     title = f"Q: {body.question}"
     slug_base = slugify(title, lowercase=True)
@@ -350,7 +354,7 @@ async def save_answer(
 
     # Place under "Questions" folder if it exists
     q_folder_result = await db.execute(
-        select(Note).where(Note.title == "Index: Questions")
+        select(Note).where(Note.title == "Index: Questions").where(Note.space_id == current_space.id)
     )
     q_folder = q_folder_result.scalar_one_or_none()
     q_parent_id = q_folder.id if q_folder else None
@@ -361,6 +365,7 @@ async def save_answer(
         tags=json.dumps(tags), level=1,
         created_at=now.isoformat(), source="Q&A",
         summary=body.answer[:300] if body.answer else None,
+        space_id=current_space.id,
     )
 
     db.add(note)
@@ -369,7 +374,7 @@ async def save_answer(
 
     wiki_targets = re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]", body.answer)
     if wiki_targets:
-        title_result = await db.execute(select(Note.id, Note.title))
+        title_result = await db.execute(select(Note.id, Note.title).where(Note.space_id == current_space.id))
         title_to_id = {row.title: row.id for row in title_result.all()}
         for target_title in set(wiki_targets):
             if target_title.startswith("raw/"):

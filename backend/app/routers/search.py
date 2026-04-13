@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_user_with_key
 from ..database import get_db
+from ..dependencies import get_current_space
 from ..models.note import Note
+from ..models.space import Space
 from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
 from ..schemas.search import SearchResult, SmartSearchResponse, SmartSearchResult
@@ -54,6 +56,7 @@ Rules:
 async def search_notes(
     q: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> list[SearchResult]:
     """Keyword search — fast, no LLM."""
     if not q:
@@ -62,6 +65,7 @@ async def search_notes(
     pattern = f"%{q}%"
     result = await db.execute(
         select(Note)
+        .where(Note.space_id == current_space.id)
         .where(or_(Note.title.like(pattern), Note.content.like(pattern)))
         .limit(20)
     )
@@ -99,7 +103,7 @@ async def search_notes(
 
     # Boost results from matching clusters
     cluster_results = await db.execute(
-        select(SubgraphNode).where(
+        select(SubgraphNode).where(SubgraphNode.space_id == current_space.id).where(
             or_(SubgraphNode.label.like(pattern), SubgraphNode.summary.like(pattern))
         )
     )
@@ -143,9 +147,10 @@ async def search_notes(
 async def enhanced_search(
     q: str = Query(...),
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> SmartSearchResponse:
     """Graph-powered search without LLM — available to all users."""
-    from ..services.graph_search import find_by_tag, find_related, grep_notes, list_all_tags
+    from ..services.graph_search import find_by_tag, find_by_cluster, find_related, grep_notes, list_all_tags
 
     # Tokenize query
     stop_words = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of", "and", "or", "with", "how", "what", "why", "when", "does", "can", "should"}
@@ -159,7 +164,7 @@ async def enhanced_search(
     note_data: dict[int, dict] = {}
 
     for term in terms[:5]:
-        matches = await grep_notes(db, term, limit=10)
+        matches = await grep_notes(db, term, limit=10, space_id=current_space.id)
         for m in matches:
             nid = m["id"]
             note_data[nid] = m
@@ -167,7 +172,7 @@ async def enhanced_search(
             scored[nid] = scored.get(nid, 0) + pts
 
     # 2. Tag search — check if any term matches a known tag
-    all_tags = await list_all_tags(db)
+    all_tags = await list_all_tags(db, space_id=current_space.id)
     tag_names = {t["tag"].lower(): t["tag"] for t in all_tags}
     matched_tags = []
     for term in terms:
@@ -177,14 +182,13 @@ async def enhanced_search(
                 break
 
     for tag in matched_tags[:3]:
-        tag_results = await find_by_tag(db, tag, limit=8)
+        tag_results = await find_by_tag(db, tag, limit=8, space_id=current_space.id)
         for r in tag_results:
             nid = r["id"]
             note_data.setdefault(nid, r)
             scored[nid] = scored.get(nid, 0) + 2.0
 
     # 2b. Cluster boost — if a note matches, boost its cluster siblings
-    from ..services.graph_search import find_by_cluster
     boosted_from_cluster: set[int] = set()
     for nid in list(scored.keys())[:5]:
         note_result = await db.execute(select(Note).where(Note.id == nid))
@@ -200,7 +204,7 @@ async def enhanced_search(
     # 3. Graph expansion — find related notes for top 3 results
     top_ids = sorted(scored, key=scored.get, reverse=True)[:3]
     for seed_id in top_ids:
-        related = await find_related(db, seed_id, limit=5)
+        related = await find_related(db, seed_id, limit=5, space_id=current_space.id)
         for r in related:
             nid = r["id"]
             note_data.setdefault(nid, r)
@@ -225,7 +229,7 @@ async def enhanced_search(
                 reasons.append(f"title matches '{term}'")
         if not reasons:
             reasons.append("content matches search terms")
-        if nid in [r["id"] for tag in matched_tags[:1] for r in (await find_by_tag(db, tag, limit=20))]:
+        if nid in [r["id"] for tag in matched_tags[:1] for r in (await find_by_tag(db, tag, limit=20, space_id=current_space.id))]:
             reasons.append(f"tagged with matching topic")
 
         smart_results.append(SmartSearchResult(
@@ -268,10 +272,11 @@ async def enhanced_search(
 async def smart_search(
     q: str = Query(...),
     db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
 ) -> SmartSearchResponse:
     """LLM-powered semantic search that understands intent."""
     # Load all note summaries as a compact catalog
-    result = await db.execute(select(Note))
+    result = await db.execute(select(Note).where(Note.space_id == current_space.id))
     all_notes = result.scalars().all()
 
     catalog_entries = []
@@ -287,7 +292,7 @@ async def smart_search(
     catalog_text = "\n".join(catalog_entries)
 
     # Include cluster context
-    clusters_result = await db.execute(select(SubgraphNode))
+    clusters_result = await db.execute(select(SubgraphNode).where(SubgraphNode.space_id == current_space.id))
     cluster_entries = []
     for c in clusters_result.scalars().all():
         member_ids = json.loads(c.member_node_ids) if c.member_node_ids else []
@@ -319,7 +324,7 @@ async def smart_search(
             data = json.loads(response)
     except (json.JSONDecodeError, Exception):
         # Fallback to keyword search
-        keyword_results = await search_notes(q, db)
+        keyword_results = await search_notes(q, db, current_space)
         return SmartSearchResponse(
             query=q,
             interpretation=q,

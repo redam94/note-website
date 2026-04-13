@@ -43,7 +43,7 @@ async def ensure_tree(state: ProcessingState) -> ProcessingState:
     # Query existing index notes
     async with async_session() as db:
         result = await db.execute(
-            select(Note).where(Note.title.like("Index: %"))
+            select(Note).where(Note.title.like("Index: %")).where(Note.space_id == state["space_id"])
         )
         existing_indexes = result.scalars().all()
 
@@ -104,6 +104,7 @@ async def ensure_tree(state: ProcessingState) -> ProcessingState:
             level=0,
             created_at=now,
             summary=f"Topic index for {folder_path}",
+            space_id=state["space_id"],
         )
 
         async with async_session() as db:
