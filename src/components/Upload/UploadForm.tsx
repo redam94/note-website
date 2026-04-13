@@ -165,7 +165,7 @@ export default function UploadForm() {
       : -1;
 
   return (
-    <div className="max-w-[560px] mx-auto px-8 py-8">
+    <div className="max-w-[560px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <h1 className="text-[24px] font-bold text-[var(--heading)] mb-6">
         Upload Document
       </h1>

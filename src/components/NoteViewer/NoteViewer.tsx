@@ -4,12 +4,8 @@ import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
 import LocalGraph from "@/components/Graph/LocalGraph";
+import NoteContent from "@/components/NoteContent";
 import type { NoteWithLinks, GraphData } from "@/types";
 
 interface NoteViewerProps {
@@ -57,133 +53,6 @@ function extractDocType(content: string): string | null {
   return m ? m[1].trim() : null;
 }
 
-// ── Content blocks: split markdown into text + callout segments ──────
-
-const CALLOUT_META: Record<string, { icon: string; label: string; cls: string }> = {
-  summary:    { icon: "📋", label: "Summary",    cls: "callout-summary" },
-  abstract:   { icon: "📋", label: "Abstract",   cls: "callout-abstract" },
-  definition: { icon: "📖", label: "Definition", cls: "callout-definition" },
-  theorem:    { icon: "📐", label: "Theorem",    cls: "callout-theorem" },
-  example:    { icon: "💡", label: "Example",    cls: "callout-example" },
-  important:  { icon: "❗", label: "Important",  cls: "callout-important" },
-  warning:    { icon: "⚠️", label: "Warning",    cls: "callout-warning" },
-  tip:        { icon: "💡", label: "Tip",        cls: "callout-tip" },
-  info:       { icon: "ℹ️", label: "Info",       cls: "callout-summary" },
-  note:       { icon: "📝", label: "Note",       cls: "callout-summary" },
-};
-
-type ContentBlock =
-  | { type: "markdown"; content: string }
-  | { type: "callout"; cls: string; icon: string; label: string; body: string };
-
-function parseContent(raw: string): ContentBlock[] {
-  // Strip frontmatter
-  const stripped = raw.replace(/^---[\s\S]*?---\n*/m, "");
-
-  // Wiki-links → markdown links
-  const withLinks = stripped.replace(
-    /\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g,
-    (_match, target, display) => {
-      const text = display || target;
-      const slug = target.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      return `[${text}](/notes/${slug})`;
-    }
-  );
-
-  // Fix display math: remark-math v6 requires $$ on its own line for display mode.
-  // Convert single-line $$....$$ to multi-line so \tag{} works.
-  const fixedMath = withLinks.replace(
-    /^\$\$(.+)\$\$$/gm,
-    (_match, inner) => `$$\n${inner}\n$$`
-  );
-
-  const lines = fixedMath.split("\n");
-  const blocks: ContentBlock[] = [];
-  let mdBuffer: string[] = [];
-  let i = 0;
-
-  function flushMd() {
-    const text = mdBuffer.join("\n").trim();
-    if (text) blocks.push({ type: "markdown", content: text });
-    mdBuffer = [];
-  }
-
-  while (i < lines.length) {
-    // Match callouts: both "> [!type] Title" and bare "[!type] Title" (no > prefix)
-    const calloutMatch =
-      lines[i].match(/^>\s*\[!(\w+)\]\s*(.*)/) ||
-      lines[i].match(/^\[!(\w+)\]\s*(.*)/);
-
-    if (calloutMatch) {
-      flushMd();
-      const type = calloutMatch[1].toLowerCase();
-      const title = calloutMatch[2] || "";
-      const meta = CALLOUT_META[type] || CALLOUT_META.tip;
-      const label = title || meta.label;
-
-      const hasQuotePrefix = lines[i].trimStart().startsWith(">");
-      const bodyLines: string[] = [];
-      i++;
-
-      // Collect body lines — handle both > prefixed and bare continuation
-      while (i < lines.length) {
-        const line = lines[i];
-        if (line.match(/^>\s/) || line === ">") {
-          // Standard blockquote continuation ("> text" or bare ">")
-          bodyLines.push(line.replace(/^>\s?/, ""));
-          i++;
-        } else if (!hasQuotePrefix && line.trim() && !line.match(/^(#{1,4}\s|>\s*\[!|\[!)/) && !line.match(/^\s*$/)) {
-          // Bare callout continuation: non-empty, not a heading, not another callout
-          bodyLines.push(line);
-          i++;
-        } else {
-          break;
-        }
-      }
-
-      // Skip blank lines after body for bare callouts
-      if (!hasQuotePrefix) {
-        while (i < lines.length && lines[i].trim() === "") { i++; }
-      }
-
-      const body = bodyLines
-        .filter((l) => !l.match(/^\^[\w-]+$/))
-        .join("\n")
-        .replace(/^\$\$(.+)\$\$$/gm, (_m, inner) => `$$\n${inner}\n$$`);
-
-      blocks.push({ type: "callout", cls: meta.cls, icon: meta.icon, label, body });
-    } else {
-      // Filter out standalone anchor references
-      if (!lines[i].match(/^\^[\w-]+$/)) {
-        mdBuffer.push(lines[i]);
-      }
-      i++;
-    }
-  }
-  flushMd();
-  return blocks;
-}
-
-// ── Shared markdown components ───────────────────────────────────────
-
-const mdComponents = {
-  h1: ({ children, ...props }: any) => <h1 id={slugify(extractText(children))} {...props}>{children}</h1>,
-  h2: ({ children, ...props }: any) => <h2 id={slugify(extractText(children))} {...props}>{children}</h2>,
-  h3: ({ children, ...props }: any) => <h3 id={slugify(extractText(children))} {...props}>{children}</h3>,
-  h4: ({ children, ...props }: any) => <h4 id={slugify(extractText(children))} {...props}>{children}</h4>,
-  a: ({ href, children }: any) => {
-    if (href?.startsWith("/notes/")) {
-      return <Link href={href} className="text-[var(--link)] hover:underline">{children}</Link>;
-    }
-    return <a href={href} className="text-[var(--link)] hover:underline">{children}</a>;
-  },
-  table: ({ children, ...props }: any) => (
-    <div className="table-wrapper">
-      <table {...props}>{children}</table>
-    </div>
-  ),
-};
-
 // ── Component ────────────────────────────────────────────────────────
 
 export default function NoteViewer({ slug }: NoteViewerProps) {
@@ -210,7 +79,6 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
       .finally(() => setLoading(false));
   }, [slug]);
 
-  const blocks = useMemo(() => (note ? parseContent(note.content) : []), [note]);
   const toc = useMemo(() => (note ? extractToc(note.content) : []), [note]);
   const fmTags = useMemo(() => (note ? extractFrontmatterTags(note.content) : []), [note]);
   const docType = useMemo(() => (note ? extractDocType(note.content) : null), [note]);
@@ -258,7 +126,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   return (
     <div className="flex min-h-screen">
       {/* ── Center ── */}
-      <div className="flex-1 max-w-[740px] mx-auto px-8 py-6">
+      <div className="flex-1 max-w-[740px] mx-auto px-4 py-4 md:px-8 md:py-6">
         {/* Breadcrumb */}
         <nav className="flex items-center gap-1.5 text-[12px] text-[var(--muted)] mb-4 flex-wrap">
           {breadcrumbs.map((bc, idx) => (
@@ -321,35 +189,8 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
           )}
         </div>
 
-        {/* Content: render blocks as alternating markdown + callouts */}
-        <div className="prose max-w-none text-[15px] leading-[1.8]">
-          {blocks.map((block, idx) => {
-            if (block.type === "callout") {
-              return (
-                <div key={idx} className={`callout ${block.cls}`}>
-                  <div className="callout-title">{block.icon} {block.label}</div>
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
-                    components={mdComponents}
-                  >
-                    {block.body}
-                  </ReactMarkdown>
-                </div>
-              );
-            }
-            return (
-              <ReactMarkdown
-                key={idx}
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex]}
-                components={mdComponents}
-              >
-                {block.content}
-              </ReactMarkdown>
-            );
-          })}
-        </div>
+        {/* Content */}
+        <NoteContent content={note.content} className="text-[15px] leading-[1.8]" />
       </div>
 
       {/* ── Right sidebar ── */}
@@ -417,15 +258,6 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
       </div>
     </div>
   );
-}
-
-function extractText(children: React.ReactNode): string {
-  if (typeof children === "string") return children;
-  if (Array.isArray(children)) return children.map(extractText).join("");
-  if (children && typeof children === "object" && "props" in children) {
-    return extractText((children as any).props.children);
-  }
-  return "";
 }
 
 function slugify(text: string): string {

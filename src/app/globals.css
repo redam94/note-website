@@ -293,6 +293,18 @@
 }
 .callout-tip .callout-title { color: var(--callout-green); }
 
+/* ── Mobile responsive ── */
+@media (max-width: 640px) {
+  .prose h1 { font-size: 1.4em; }
+  .prose h2 { font-size: 1.2em; }
+  .prose h3 { font-size: 1.05em; }
+  .prose p { text-indent: 0; }
+  .prose table { min-width: unset; font-size: 0.85em; }
+  .prose table th, .prose table td { padding: 0.3em 0.5em; }
+  .callout { padding: 10px 14px; }
+  .prose pre { font-size: 0.82em; }
+}
+
 /* ── Scrollbars ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

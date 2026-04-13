@@ -26,13 +26,54 @@ export default function Sidebar() {
   const { role, logout } = useAuth();
   const isAdmin = role === "admin";
 
-  // Refetch when pathname changes (navigation after add/delete)
+  // When pathname changes, expand ancestors of the active note
   useEffect(() => {
     if (prevPathRef.current !== pathname) {
       prevPathRef.current = pathname;
       fetchTree();
     }
   }, [pathname]);
+
+  // Expand ancestors of the currently viewed note whenever pathname changes
+  useEffect(() => {
+    const currentSlug = pathname?.startsWith("/notes/") ? pathname.slice(7) : "";
+    if (!currentSlug || tree.length === 0) return;
+
+    // Build parent map from current tree
+    const parentOf = new Map<number, number>();
+    function walkTree(node: TreeNode) {
+      for (const child of node.children) {
+        parentOf.set(child.id, node.id);
+        walkTree(child);
+      }
+    }
+    tree.forEach(walkTree);
+
+    // Find the node and expand its ancestors
+    function findAndExpand(nodes: TreeNode[]): boolean {
+      for (const n of nodes) {
+        if (n.slug === currentSlug) {
+          const toExpand: number[] = [];
+          let cur = n.id;
+          while (parentOf.has(cur)) {
+            cur = parentOf.get(cur)!;
+            toExpand.push(cur);
+          }
+          if (toExpand.length > 0) {
+            setExpandedIds((prev) => {
+              const next = new Set(prev);
+              for (const id of toExpand) next.add(id);
+              return next;
+            });
+          }
+          return true;
+        }
+        if (findAndExpand(n.children)) return true;
+      }
+      return false;
+    }
+    findAndExpand(tree);
+  }, [pathname, tree]);
 
   // Initial fetch + listen for explicit refresh events
   useEffect(() => {
@@ -66,7 +107,7 @@ export default function Sidebar() {
           const child = nodeMap.get(e.target);
           if (parent && child && e.source !== e.target) {
             // Only add if child level > parent level (proper nesting)
-            if (child.level > parent.level || child.level === 0) {
+            if (child.id !== parent.id) {
               // Avoid duplicate children
               if (!parent.children.some((c) => c.id === child.id)) {
                 parent.children.push(child);
@@ -125,14 +166,51 @@ export default function Sidebar() {
 
       roots.forEach(sortChildren);
 
-      // Auto-expand level 1 nodes
-      const autoExpand = new Set<number>();
-      for (const r of roots) {
-        if (r.children.length > 0) autoExpand.add(r.id);
+      // Build parent map for ancestor lookups
+      const parentOf = new Map<number, number>();
+      function mapParents(node: TreeNode) {
+        for (const child of node.children) {
+          parentOf.set(child.id, node.id);
+          mapParents(child);
+        }
+      }
+      roots.forEach(mapParents);
+
+      // Find ancestors of the active note (from current pathname)
+      function getAncestorIds(slug: string): Set<number> {
+        const ids = new Set<number>();
+        // Find the node matching the current slug
+        for (const n of nodeMap.values()) {
+          if (n.slug === slug) {
+            let cur = n.id;
+            while (parentOf.has(cur)) {
+              cur = parentOf.get(cur)!;
+              ids.add(cur);
+            }
+            break;
+          }
+        }
+        return ids;
       }
 
+      const currentSlug = pathname?.startsWith("/notes/") ? pathname.slice(7) : "";
+      const ancestorIds = currentSlug ? getAncestorIds(currentSlug) : new Set<number>();
+
       setTree(roots);
-      setExpandedIds(autoExpand);
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        // Auto-expand roots with children on first load
+        if (prev.size === 0) {
+          for (const r of roots) {
+            if (r.children.length > 0) next.add(r.id);
+          }
+        }
+        // Always expand ancestors of the active note
+        for (const id of ancestorIds) {
+          next.add(id);
+        }
+        return next;
+      });
     } catch { /* silent */ }
   }
 
@@ -145,11 +223,15 @@ export default function Sidebar() {
   }
 
   function shortenTitle(title: string): string {
-    let short = title
-      .replace(/^Index:\s*/i, "📑 ")
-      .replace(/^Q:\s*/i, "❓ ");
+    // Index notes: strip "Index: " prefix and show only the leaf folder name
+    if (/^Index:\s*/i.test(title)) {
+      const path = title.replace(/^Index:\s*/i, "");
+      const leaf = path.includes("/") ? path.split("/").pop()! : path;
+      return `📑 ${leaf}`;
+    }
+
+    let short = title.replace(/^Q:\s*/i, "❓ ");
     if (short.length > 45) {
-      // Truncate at colon if long
       if (short.includes(": ") && short.indexOf(": ") < 40) {
         short = short.split(": ").slice(1).join(": ");
       }

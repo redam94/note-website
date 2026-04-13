@@ -21,6 +21,7 @@ from ..auth import require_admin
 from ..database import async_session, get_db
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
+from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
 from ..services.model_provider import get_provider
 
@@ -328,11 +329,40 @@ async def _run_reindex(job_id: str):
             result = await db.execute(select(Note))
             all_notes = result.scalars().all()
 
-        folder_notes: dict[str, list] = {}
+        # Pass 0: Load community detection clusters to inform folder assignment
+        _jobs[job_id]["progress"] = "Loading community clusters..."
+        cluster_folder_map: dict[int, str] = {}  # note_id -> cluster-derived folder
+        async with async_session() as db:
+            clusters_result = await db.execute(select(SubgraphNode))
+            clusters = clusters_result.scalars().all()
+
+        if clusters:
+            for cluster in clusters:
+                member_ids = json.loads(cluster.member_node_ids) if cluster.member_node_ids else []
+                # Use the hierarchical path if available, otherwise the label
+                folder_path = (cluster.path or cluster.label or "Uncategorized").strip()
+                for nid in member_ids:
+                    # Keep the deepest (most specific) cluster path per note
+                    existing = cluster_folder_map.get(nid, "")
+                    if len(folder_path) > len(existing):
+                        cluster_folder_map[nid] = folder_path
+
+        # Map notes to their folder paths from frontmatter, falling back to cluster labels
+        note_folders: dict[int, str] = {}  # note_id -> folder_path
+        folder_notes: dict[str, list] = {}  # folder_path -> [notes]
         for n in all_notes:
+            if n.title.startswith("Index:"):
+                continue  # Skip index notes themselves
+            if n.title.startswith("Q: "):
+                continue  # Q&A notes handled separately
             fm_match = re.search(r'folder:\s*"?([^"\n]+)"?', n.content or "")
-            folder = fm_match.group(1).strip() if fm_match else (n.source or "")
+            folder = fm_match.group(1).strip() if fm_match else ""
+            # Fall back to community cluster label if no folder in frontmatter
+            if not folder and n.id in cluster_folder_map:
+                folder = cluster_folder_map[n.id]
             if folder:
+                note_folders[n.id] = folder
+                # Ensure all ancestor paths are tracked
                 parts = folder.split("/")
                 for i in range(len(parts)):
                     path = "/".join(parts[: i + 1])
@@ -342,10 +372,11 @@ async def _run_reindex(job_id: str):
             provider = await get_provider(db)
             slugs_result = await db.execute(select(Note.slug))
             existing_slugs = set(slugs_result.scalars().all())
-            existing_indexes = {}
+            existing_indexes: dict[str, Note] = {}
             for n in all_notes:
                 if n.title.startswith("Index:"):
-                    existing_indexes[n.title] = n
+                    path = n.title.removeprefix("Index: ").strip()
+                    existing_indexes[path] = n
 
         from ..prompts import load_prompt
         index_system = load_prompt("index_gen").format()
@@ -355,17 +386,23 @@ async def _run_reindex(job_id: str):
         details = []
         now = datetime.now(timezone.utc)
 
-        total_folders = len([f for f, notes in folder_notes.items() if len(notes) >= 2])
-        done = 0
+        # Sort by depth so parents are created before children
+        all_folder_paths = sorted(folder_notes.keys(), key=lambda p: (p.count("/"), p))
+        total_folders = len(all_folder_paths)
+        path_to_id: dict[str, int] = {}
 
-        for folder_path, notes in sorted(folder_notes.items()):
-            if len(notes) < 2:
-                continue
-
+        # Pass 1: Create/update index notes with proper parent_id chains
+        for done, folder_path in enumerate(all_folder_paths):
             _jobs[job_id]["progress"] = f"Indexing {folder_path}... ({done}/{total_folders})"
 
+            notes = folder_notes[folder_path]
             index_title = f"Index: {folder_path}"
             children_desc = "\n".join(f"- {n.title}" for n in notes[:20])
+
+            # Determine parent index
+            parts = folder_path.split("/")
+            parent_path = "/".join(parts[:-1]) if len(parts) > 1 else None
+            parent_id = path_to_id.get(parent_path) if parent_path else None
 
             try:
                 response = await provider.complete(
@@ -379,16 +416,19 @@ async def _run_reindex(job_id: str):
             except Exception:
                 index_data = {"summary": f"Index for {folder_path}", "content": f"## Notes\n{children_desc}"}
 
+            leaf_name = parts[-1]
             frontmatter = f"---\ntitle: \"{index_title}\"\ntags:\n  - type/index\ndate_updated: {now.strftime('%Y-%m-%d')}\nconcept_count: {len(notes)}\n---"
-            full_content = f"{frontmatter}\n\n# {folder_path}\n\n{index_data.get('content', '')}"
+            full_content = f"{frontmatter}\n\n# {leaf_name}\n\n{index_data.get('content', '')}"
 
             async with async_session() as db:
-                if index_title in existing_indexes:
+                if folder_path in existing_indexes:
                     existing = await db.execute(select(Note).where(Note.title == index_title))
                     idx_note = existing.scalar_one_or_none()
                     if idx_note:
                         idx_note.content = full_content
                         idx_note.summary = index_data.get("summary")
+                        idx_note.parent_id = parent_id
+                        path_to_id[folder_path] = idx_note.id
                         updated += 1
                         details.append(f"Updated: {index_title}")
                 else:
@@ -399,7 +439,9 @@ async def _run_reindex(job_id: str):
                         c += 1
                     existing_slugs.add(slug)
 
-                    db.add(Note(
+                    new_note = Note(
+                        document_id=None,
+                        parent_id=parent_id,
                         title=index_title,
                         content=full_content,
                         slug=slug,
@@ -407,21 +449,221 @@ async def _run_reindex(job_id: str):
                         level=0,
                         created_at=now.isoformat(),
                         summary=index_data.get("summary"),
-                    ))
+                    )
+                    db.add(new_note)
+                    await db.commit()
+                    await db.refresh(new_note)
+                    path_to_id[folder_path] = new_note.id
                     created += 1
                     details.append(f"Created: {index_title}")
+                    continue  # already committed
                 await db.commit()
 
-            done += 1
+        # Pass 2: Re-parent content notes to their folder's index note
+        reparented = 0
+        _jobs[job_id]["progress"] = "Re-parenting content notes into topic tree..."
+        async with async_session() as db:
+            for note_id, folder_path in note_folders.items():
+                index_id = path_to_id.get(folder_path)
+                if index_id:
+                    await db.execute(
+                        update(Note)
+                        .where(and_(Note.id == note_id, or_(Note.parent_id != index_id, Note.parent_id.is_(None))))
+                        .values(parent_id=index_id)
+                    )
+                    reparented += 1
+            await db.commit()
+
+        details.append(f"Re-parented {reparented} content notes into topic tree")
+
+        # Pass 3: Remove orphaned index notes (indexes with no children)
+        _jobs[job_id]["progress"] = "Cleaning up orphaned index notes..."
+        cleaned = 0
+        async with async_session() as db:
+            idx_result = await db.execute(
+                select(Note).where(Note.title.like("Index: %"))
+            )
+            all_indexes = idx_result.scalars().all()
+            all_index_ids = {n.id for n in all_indexes}
+
+            for idx_note in all_indexes:
+                # Check if this index has any children
+                children_result = await db.execute(
+                    select(func.count()).select_from(Note).where(Note.parent_id == idx_note.id)
+                )
+                child_count = children_result.scalar()
+                if child_count == 0:
+                    # Also delete any graph edges referencing this note
+                    await db.execute(
+                        GraphEdge.__table__.delete().where(
+                            or_(GraphEdge.source_id == idx_note.id, GraphEdge.target_id == idx_note.id)
+                        )
+                    )
+                    await db.execute(
+                        Note.__table__.delete().where(Note.id == idx_note.id)
+                    )
+                    cleaned += 1
+                    details.append(f"Removed orphan: {idx_note.title}")
+            await db.commit()
+
+        if cleaned:
+            details.append(f"Cleaned up {cleaned} orphaned index notes")
+
+        # Pass 4: Ensure "Questions" folder exists for Q&A notes
+        _jobs[job_id]["progress"] = "Ensuring Questions folder..."
+        async with async_session() as db:
+            q_idx_result = await db.execute(
+                select(Note).where(Note.title == "Index: Questions")
+            )
+            q_idx = q_idx_result.scalar_one_or_none()
+            if not q_idx:
+                q_slug = "index-questions"
+                c = 1
+                while q_slug in existing_slugs:
+                    q_slug = f"index-questions-{c}"
+                    c += 1
+                existing_slugs.add(q_slug)
+                q_idx = Note(
+                    document_id=None, parent_id=None,
+                    title="Index: Questions",
+                    content=f"---\ntitle: \"Index: Questions\"\ntags:\n  - type/index\ndate_updated: {now.strftime('%Y-%m-%d')}\n---\n\n# Questions\n\n> Saved Q&A answers from the knowledge base.",
+                    slug=q_slug, tags=json.dumps(["type/index"]),
+                    level=0, created_at=now.isoformat(),
+                    summary="Saved Q&A answers",
+                )
+                db.add(q_idx)
+                await db.commit()
+                await db.refresh(q_idx)
+                created += 1
+                details.append("Created: Index: Questions")
+
+            # Re-parent Q&A notes into Questions folder
+            qa_result = await db.execute(
+                select(Note).where(Note.title.like("Q: %"))
+            )
+            qa_reparented = 0
+            for qa_note in qa_result.scalars().all():
+                if qa_note.parent_id != q_idx.id:
+                    qa_note.parent_id = q_idx.id
+                    qa_reparented += 1
+            if qa_reparented:
+                await db.commit()
+                details.append(f"Re-parented {qa_reparented} Q&A notes into Questions folder")
+
+        # Pass 5: Create/update root index
+        _jobs[job_id]["progress"] = "Building root index..."
+        async with async_session() as db:
+            # Find all root-level index notes (no parent)
+            root_children_result = await db.execute(
+                select(Note).where(
+                    and_(Note.parent_id.is_(None), Note.title.like("Index: %"), Note.title != "Index: Root")
+                )
+            )
+            root_children = root_children_result.scalars().all()
+
+            # Also find root-level content notes (no parent, not indexes, not Q&A in Questions)
+            orphan_content_result = await db.execute(
+                select(Note).where(
+                    and_(
+                        Note.parent_id.is_(None),
+                        ~Note.title.like("Index: %"),
+                        Note.title != "Index: Root",
+                    )
+                )
+            )
+            orphan_content = orphan_content_result.scalars().all()
+
+            all_root_items = root_children + orphan_content
+            children_desc = "\n".join(f"- {n.title}" for n in all_root_items[:30])
+
+            try:
+                response = await provider.complete(
+                    messages=[{"role": "user", "content": f"Root of knowledge base\nTop-level items ({len(all_root_items)}):\n{children_desc}"}],
+                    system=index_system,
+                    max_tokens=2048,
+                    tier="simple",
+                )
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
+                root_data = json.loads(json_match.group()) if json_match else json.loads(response)
+            except Exception:
+                root_data = {"summary": f"Knowledge base with {len(all_root_items)} topics", "content": f"## Topics\n{children_desc}"}
+
+            root_fm = f"---\ntitle: \"Index: Root\"\ntags:\n  - type/index\ndate_updated: {now.strftime('%Y-%m-%d')}\nconcept_count: {len(all_root_items)}\n---"
+            root_content = f"{root_fm}\n\n# Knowledge Base\n\n{root_data.get('content', '')}"
+
+            root_result = await db.execute(select(Note).where(Note.title == "Index: Root"))
+            root_note = root_result.scalar_one_or_none()
+
+            if root_note:
+                root_note.content = root_content
+                root_note.summary = root_data.get("summary")
+                updated += 1
+                details.append("Updated: Index: Root")
+            else:
+                r_slug = "index-root"
+                c = 1
+                while r_slug in existing_slugs:
+                    r_slug = f"index-root-{c}"
+                    c += 1
+                root_note = Note(
+                    document_id=None, parent_id=None,
+                    title="Index: Root",
+                    content=root_content, slug=r_slug,
+                    tags=json.dumps(["type/index"]),
+                    level=0, created_at=now.isoformat(),
+                    summary=root_data.get("summary"),
+                )
+                db.add(root_note)
+                await db.commit()
+                await db.refresh(root_note)
+                created += 1
+                details.append("Created: Index: Root")
+
+            # Re-parent root-level indexes under root note
+            for child in root_children:
+                if child.parent_id != root_note.id:
+                    child.parent_id = root_note.id
+
+            await db.commit()
 
         _jobs[job_id] = {
             "job_id": job_id,
             "status": "done",
-            "progress": f"Complete: {created} created, {updated} updated",
+            "progress": f"Complete: {created} created, {updated} updated, {reparented} re-parented, {cleaned} cleaned",
             "result": {"indexes_created": created, "indexes_updated": updated, "details": details},
         }
     except Exception as e:
         _jobs[job_id] = {"job_id": job_id, "status": "error", "progress": str(e), "result": None}
+
+
+# ── Cleanup Orphaned Index Notes ─────────────────────────────────────
+
+
+@router.post("/cleanup-indexes")
+async def cleanup_orphaned_indexes(db: AsyncSession = Depends(get_db)) -> dict:
+    """Remove index notes that have no children (orphaned by re-parenting)."""
+    idx_result = await db.execute(
+        select(Note).where(Note.title.like("Index: %"))
+    )
+    all_indexes = idx_result.scalars().all()
+
+    removed = []
+    for idx_note in all_indexes:
+        children_result = await db.execute(
+            select(func.count()).select_from(Note).where(Note.parent_id == idx_note.id)
+        )
+        child_count = children_result.scalar()
+        if child_count == 0:
+            await db.execute(
+                GraphEdge.__table__.delete().where(
+                    or_(GraphEdge.source_id == idx_note.id, GraphEdge.target_id == idx_note.id)
+                )
+            )
+            await db.delete(idx_note)
+            removed.append(idx_note.title)
+
+    await db.commit()
+    return {"removed": len(removed), "details": removed}
 
 
 # ── Repair Shallow (background task) ──────────────────────────────────

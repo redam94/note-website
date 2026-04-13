@@ -1,14 +1,21 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar/Sidebar";
 import AuthProvider from "@/components/AuthProvider";
+import MobileShell from "@/components/MobileShell";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Second Brain",
   description: "A knowledge base powered by LLM ingestion and graph linking",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
 };
 
 export default function RootLayout({
@@ -20,10 +27,9 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <AuthProvider>
-          <div className="flex h-screen overflow-hidden">
-            <Sidebar />
-            <div className="flex-1 overflow-y-auto">{children}</div>
-          </div>
+          <MobileShell sidebar={<Sidebar />}>
+            {children}
+          </MobileShell>
         </AuthProvider>
       </body>
     </html>

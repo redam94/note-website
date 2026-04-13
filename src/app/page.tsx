@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import ForceGraph from "@/components/Graph/ForceGraph";
+import NoteContent from "@/components/NoteContent";
 import type { GraphData } from "@/types";
 
 interface NotePreview {
@@ -14,9 +15,16 @@ interface NotePreview {
   level: number;
 }
 
+interface RootIndex {
+  slug: string;
+  content: string;
+  summary: string | null;
+}
+
 export default function Home() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
   const [notes, setNotes] = useState<NotePreview[]>([]);
+  const [rootIndex, setRootIndex] = useState<RootIndex | null>(null);
   const [loading, setLoading] = useState(true);
   const [showGraph, setShowGraph] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -24,17 +32,28 @@ export default function Home() {
   const router = useRouter();
 
   useEffect(() => {
-    fetch("/api/graph")
-      .then((r) => (r.ok ? r.json() : { nodes: [], edges: [] }))
-      .then((graph) => {
-        setGraphData(graph);
-        setNotes(
-          graph.nodes
-            .map((n: any) => ({ id: n.id, title: n.title, slug: n.slug, tags: n.tags || [], level: n.level }))
-            .sort((a: NotePreview, b: NotePreview) => a.level - b.level || a.title.localeCompare(b.title))
-        );
-      })
-      .finally(() => setLoading(false));
+    // Fetch graph data and try to find root index
+    Promise.all([
+      fetch("/api/graph").then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
+      fetch("/api/search?q=Index%3A+Root").then((r) => (r.ok ? r.json() : [])),
+    ]).then(([graph, searchResults]) => {
+      setGraphData(graph);
+      setNotes(
+        graph.nodes
+          .map((n: any) => ({ id: n.id, title: n.title, slug: n.slug, tags: n.tags || [], level: n.level }))
+          .sort((a: NotePreview, b: NotePreview) => a.level - b.level || a.title.localeCompare(b.title))
+      );
+      // Find the root index note from search results
+      const root = searchResults.find((r: any) => r.title === "Index: Root");
+      if (root) {
+        // Fetch full note content
+        fetch(`/api/notes/${root.slug}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((note) => {
+            if (note) setRootIndex({ slug: note.slug, content: note.content, summary: note.summary });
+          });
+      }
+    }).finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -80,8 +99,33 @@ export default function Home() {
     );
   }
 
+  // If a root index exists, redirect to its note page
+  if (rootIndex) {
+    return (
+      <div className="max-w-[720px] mx-auto px-4 py-6 md:px-8 md:py-8">
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-[28px] font-bold text-[var(--heading)] mb-1">Knowledge Base</h1>
+            <p className="text-[13px] text-[var(--text-secondary)]">
+              {notes.length} notes · {graphData.edges.length} connections
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <button onClick={() => setShowGraph(true)} className="text-[13px] text-[var(--link)] hover:underline">
+              Graph view
+            </button>
+            <Link href="/search" className="text-[13px] text-[var(--link)] hover:underline">Search</Link>
+            <Link href="/upload" className="text-[13px] text-[var(--link)] hover:underline">Upload</Link>
+          </div>
+        </div>
+
+        <NoteContent content={rootIndex.content} />
+      </div>
+    );
+  }
+
   return (
-    <div className="max-w-[720px] mx-auto px-8 py-8">
+    <div className="max-w-[720px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <div className="mb-8">
         <h1 className="text-[28px] font-bold text-[var(--heading)] mb-1">Second Brain</h1>
         <p className="text-[13px] text-[var(--text-secondary)]">
@@ -90,7 +134,7 @@ export default function Home() {
       </div>
 
       <div className="callout callout-abstract mb-8">
-        <div className="callout-title">📋 About</div>
+        <div className="callout-title">About</div>
         <p className="text-[14px] text-[var(--text-secondary)] leading-relaxed mt-1">
           A structured knowledge base of ingested documents, extracted notes, and cross-linked concepts.
           Use the graph view or search bar to explore connections across the collection.

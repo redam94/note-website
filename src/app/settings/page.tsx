@@ -76,7 +76,7 @@ export default function SettingsPage() {
     "px-3 py-1.5 text-[13px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded border border-[var(--border)] hover:bg-[var(--border)] transition-colors";
 
   return (
-    <div className="max-w-[620px] mx-auto px-8 py-8">
+    <div className="max-w-[620px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <h1 className="text-[24px] font-bold text-[var(--heading)] mb-6">Settings</h1>
 
       <div className="space-y-5">

@@ -55,10 +55,12 @@ async def run_processing_pipeline(
             "note_plan": [],
             "existing_tags": [],
             "existing_note_titles": [],
+            "folder_id_map": {},
             "created_notes": [],
             "index_notes": [],
             "linked_notes": [],
             "cross_links": [],
+            "community_updates": [],
             "error": None,
         }
         last_node = None

@@ -1,6 +1,7 @@
 section_order:
   - role
   - hierarchy_rules
+  - existing_tree
   - tag_rules
   - callout_planning
   - dependency_rules
@@ -18,13 +19,23 @@ sections:
     template: |-
       Folder hierarchy rules:
 
-      - Organize notes into a topic-based folder path, e.g., "Bayesian Statistics/Inference Fundamentals"
-      - Level 1 notes are broad topics (the folder itself)
-      - Level 2 notes are subtopics within a folder
-      - Level 3 notes are atomic concept notes
+      - Organize notes into a topic-based folder path, e.g., "Bayesian Statistics/Inference Fundamentals/MCMC Methods"
+      - Folder depth is UNLIMITED — use as many levels as the conceptual hierarchy requires
+      - Level 1 = broad domain, Level 2 = subtopic, Level 3+ = increasingly specific sub-subtopics
       - Each note covers ONE topic and should be self-contained
       - The folder path should reflect the conceptual hierarchy, not the document structure
       - Assign a "folder" field to each note with its full path
+      - Sub-subtopics are encouraged — e.g., "Statistics/Bayesian/MCMC/Hamiltonian Monte Carlo"
+
+  existing_tree:
+    template: |-
+      Existing topic tree in the knowledge base (PREFER placing notes under these
+      existing folders — use the EXACT same path when the topic fits; only create
+      new folder paths when nothing in this tree is appropriate):
+
+      {existing_tree}
+    required_vars:
+      - existing_tree
 
   tag_rules:
     template: |-
@@ -63,7 +74,7 @@ sections:
           {{
             "title": "Note Title",
             "parent_title": null,
-            "folder": "Topic/Subtopic",
+            "folder": "Topic/Subtopic/SubSubtopic",
             "tags": ["topic/statistics", "type/concept"],
             "chapter": "Chapter/Section Name",
             "page": 1,

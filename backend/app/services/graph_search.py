@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
+from ..models.subgraph_node import SubgraphNode
 
 
 # ---------------------------------------------------------------------------
@@ -517,3 +518,55 @@ async def find_related(
             results.append(info)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# 10. Get cluster context for a note
+# ---------------------------------------------------------------------------
+
+async def get_cluster_context(
+    db: AsyncSession,
+    note_id: int,
+) -> dict | None:
+    """Return the cluster a note belongs to, with sibling notes."""
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note or not note.cluster_id:
+        return None
+
+    cluster_result = await db.execute(
+        select(SubgraphNode).where(SubgraphNode.id == note.cluster_id)
+    )
+    cluster = cluster_result.scalar_one_or_none()
+    if not cluster:
+        return None
+
+    member_ids = json.loads(cluster.member_node_ids) if cluster.member_node_ids else []
+    sibling_ids = [mid for mid in member_ids if mid != note_id]
+
+    siblings_result = await db.execute(
+        select(Note).where(Note.id.in_(sibling_ids))
+    )
+    siblings = [_note_summary(n) for n in siblings_result.scalars().all()]
+
+    return {
+        "cluster_id": cluster.id,
+        "cluster_label": cluster.label,
+        "cluster_summary": cluster.summary,
+        "siblings": siblings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 11. Find notes by cluster
+# ---------------------------------------------------------------------------
+
+async def find_by_cluster(
+    db: AsyncSession,
+    cluster_id: int,
+) -> list[dict]:
+    """Return all notes in a given cluster."""
+    result = await db.execute(
+        select(Note).where(Note.cluster_id == cluster_id)
+    )
+    return [_note_summary(n) for n in result.scalars().all()]

@@ -7,14 +7,10 @@ from sqlalchemy import select
 
 from ...database import async_session
 from ...models.note import Note
-from ...prompts import load_prompt
+from ...prompts import load_prompt_builder
 from ...services.model_provider import get_provider
 from ..progress import set_step
 from ..state import ProcessingState
-
-_system_prompt = load_prompt("plan")
-
-PLAN_SYSTEM = _system_prompt.format()
 
 _UNUSED = """\
 You are a knowledge management planner creating a note extraction plan for an Obsidian-style \
@@ -58,13 +54,40 @@ doc_type options: concept, definition, theorem, paper, textbook, tutorial
 """
 
 
+def _build_tree_text(index_notes: list) -> str:
+    """Reconstruct the topic tree as indented text from index notes."""
+    if not index_notes:
+        return "(empty — no topics yet)"
+
+    paths: list[str] = []
+
+    for n in index_notes:
+        # Extract path from title: "Index: Statistics/Bayesian Methods" -> "Statistics/Bayesian Methods"
+        path = n.title.removeprefix("Index: ").strip()
+        if path:
+            paths.append(path)
+
+    if not paths:
+        return "(empty — no topics yet)"
+
+    # Sort by depth then alphabetically for clean indented output
+    paths.sort(key=lambda p: (p.count("/"), p))
+    lines = []
+    for path in paths:
+        depth = path.count("/")
+        leaf = path.rsplit("/", 1)[-1] if "/" in path else path
+        lines.append("  " * depth + f"- {leaf}/")
+
+    return "\n".join(lines)
+
+
 async def create_plan(state: ProcessingState) -> ProcessingState:
     """Plan what notes to create based on the outline."""
     await set_step(state["document_id"], "Planning note extraction...")
     outline = state["outline"]
     original_name = state["original_name"]
 
-    # Fetch existing tags and note titles from DB
+    # Fetch existing tags, note titles, and topic tree from DB
     async with async_session() as db:
         tags_result = await db.execute(select(Note.tags))
         all_tags_raw = tags_result.scalars().all()
@@ -72,7 +95,15 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
         titles_result = await db.execute(select(Note.title))
         existing_titles = [t for t in titles_result.scalars().all()]
 
+        # Query existing index notes for the topic tree
+        index_result = await db.execute(
+            select(Note).where(Note.title.like("Index: %"))
+        )
+        index_notes = index_result.scalars().all()
+
         provider = await get_provider(db)
+
+    tree_text = _build_tree_text(index_notes)
 
     existing_tags: set[str] = set()
     for tags_raw in all_tags_raw:
@@ -119,6 +150,15 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
         "Create a plan for extracting notes. Consider which notes need definitions, "
         "theorems, math, and examples. Plan the dependency relationships."
     )
+
+    # Build system prompt with optional existing tree
+    plan_prompt_builder = (
+        load_prompt_builder("plan")
+        .include("role", "hierarchy_rules", "tag_rules", "callout_planning", "dependency_rules", "output_schema")
+        .include_if(bool(index_notes), "existing_tree")
+    )
+    plan_template = plan_prompt_builder.build()
+    PLAN_SYSTEM = plan_template.format(existing_tree=tree_text) if index_notes else plan_template.format()
 
     try:
         response = await provider.complete(

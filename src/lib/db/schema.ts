@@ -27,6 +27,7 @@ export const notes = sqliteTable("notes", {
   tags: text("tags", { mode: "json" }).$type<string[]>().default([]),
   level: integer("level").notNull().default(1),
   embedding: text("embedding", { mode: "json" }).$type<number[]>(),
+  clusterId: integer("cluster_id"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -51,9 +52,38 @@ export const graphEdges = sqliteTable("graph_edges", {
     ],
   }).notNull(),
   confidence: real("confidence").notNull().default(0.5),
+  referenceCount: integer("reference_count").notNull().default(1),
   createdBy: text("created_by", { enum: ["llm", "user"] })
     .notNull()
     .default("llm"),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+export const subgraphNodes = sqliteTable("subgraph_nodes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  label: text("label").notNull(),
+  memberNodeIds: text("member_node_ids").notNull().default("[]"),
+  summary: text("summary"),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  updatedAt: text("updated_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+export const subgraphEdges = sqliteTable("subgraph_edges", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sourceClusterId: integer("source_cluster_id")
+    .notNull()
+    .references(() => subgraphNodes.id, { onDelete: "cascade" }),
+  targetClusterId: integer("target_cluster_id")
+    .notNull()
+    .references(() => subgraphNodes.id, { onDelete: "cascade" }),
+  weight: real("weight").notNull().default(0),
+  crossEdgeCount: integer("cross_edge_count").notNull().default(0),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -65,3 +95,7 @@ export type Note = typeof notes.$inferSelect;
 export type NewNote = typeof notes.$inferInsert;
 export type GraphEdge = typeof graphEdges.$inferSelect;
 export type NewGraphEdge = typeof graphEdges.$inferInsert;
+export type SubgraphNode = typeof subgraphNodes.$inferSelect;
+export type NewSubgraphNode = typeof subgraphNodes.$inferInsert;
+export type SubgraphEdge = typeof subgraphEdges.$inferSelect;
+export type NewSubgraphEdge = typeof subgraphEdges.$inferInsert;

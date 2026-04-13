@@ -207,7 +207,7 @@ export default function SearchPanel({
   };
 
   return (
-    <div className="max-w-3xl mx-auto px-8 py-8">
+    <div className="max-w-3xl mx-auto px-4 py-6 md:px-8 md:py-8">
       <div className="mb-8">
         <h1 className="text-[24px] font-bold text-[var(--heading)] mb-1">Search</h1>
         <p className="text-[var(--text-secondary)] text-sm">Find notes by meaning, keywords, or ask a question</p>

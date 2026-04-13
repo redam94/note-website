@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_user_with_key
 from ..database import get_db
 from ..models.note import Note
+from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
 from ..schemas.search import SearchResult, SmartSearchResponse, SmartSearchResult
 from ..services.graph_search import _parse_tags
@@ -96,6 +97,44 @@ async def search_notes(
             )
         )
 
+    # Boost results from matching clusters
+    cluster_results = await db.execute(
+        select(SubgraphNode).where(
+            or_(SubgraphNode.label.like(pattern), SubgraphNode.summary.like(pattern))
+        )
+    )
+    matched_cluster_ids = set()
+    for c in cluster_results.scalars().all():
+        member_ids = json.loads(c.member_node_ids) if c.member_node_ids else []
+        matched_cluster_ids.update(member_ids)
+
+    existing_ids = {r.id for r in results}
+    if matched_cluster_ids:
+        # Boost existing matches that are in matching clusters
+        for r in results:
+            if r.id in matched_cluster_ids:
+                r.score = min(r.score + 0.3, 1.0)
+
+        # Add cluster members not yet in results
+        missing_ids = matched_cluster_ids - existing_ids
+        if missing_ids:
+            extra = await db.execute(
+                select(Note).where(Note.id.in_(missing_ids)).limit(10)
+            )
+            for n in extra.scalars().all():
+                tags = _parse_tags(n.tags)
+                results.append(
+                    SearchResult(
+                        id=n.id,
+                        title=n.title,
+                        slug=n.slug,
+                        excerpt=n.content[:120] + "...",
+                        tags=tags,
+                        matchType="cluster",
+                        score=0.6,
+                    )
+                )
+
     results.sort(key=lambda r: r.score, reverse=True)
     return results
 
@@ -143,6 +182,20 @@ async def enhanced_search(
             nid = r["id"]
             note_data.setdefault(nid, r)
             scored[nid] = scored.get(nid, 0) + 2.0
+
+    # 2b. Cluster boost — if a note matches, boost its cluster siblings
+    from ..services.graph_search import find_by_cluster
+    boosted_from_cluster: set[int] = set()
+    for nid in list(scored.keys())[:5]:
+        note_result = await db.execute(select(Note).where(Note.id == nid))
+        note = note_result.scalar_one_or_none()
+        if note and note.cluster_id and note.cluster_id not in boosted_from_cluster:
+            boosted_from_cluster.add(note.cluster_id)
+            cluster_notes = await find_by_cluster(db, note.cluster_id)
+            for cn in cluster_notes:
+                cnid = cn["id"]
+                note_data.setdefault(cnid, cn)
+                scored[cnid] = scored.get(cnid, 0) + 1.5
 
     # 3. Graph expansion — find related notes for top 3 results
     top_ids = sorted(scored, key=scored.get, reverse=True)[:3]
@@ -233,9 +286,20 @@ async def smart_search(
 
     catalog_text = "\n".join(catalog_entries)
 
+    # Include cluster context
+    clusters_result = await db.execute(select(SubgraphNode))
+    cluster_entries = []
+    for c in clusters_result.scalars().all():
+        member_ids = json.loads(c.member_node_ids) if c.member_node_ids else []
+        cluster_entries.append(
+            f"CLUSTER:{c.id} | {c.label} | {c.summary or ''} | members: {member_ids[:10]}"
+        )
+    cluster_text = "\n".join(cluster_entries) if cluster_entries else "No clusters detected yet."
+
     prompt = (
         f"User query: {q}\n\n"
-        f"Note catalog ({len(all_notes)} notes):\n{catalog_text}"
+        f"Note catalog ({len(all_notes)} notes):\n{catalog_text}\n\n"
+        f"Topic clusters:\n{cluster_text}"
     )
 
     provider = await get_provider(db)

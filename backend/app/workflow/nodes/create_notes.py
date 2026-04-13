@@ -410,8 +410,14 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             counter += 1
         existing_slugs.add(slug)
 
-        parent_title = plan_entry.get("parent_title")
-        parent_id = slug_map.get(parent_title) if parent_title else None
+        # Primary: use folder path to assign parent to the tree index note
+        folder = plan_entry.get("folder", "")
+        folder_id_map = state.get("folder_id_map", {})
+        parent_id = folder_id_map.get(folder)
+        # Fallback: use parent_title within current document
+        if parent_id is None:
+            parent_title = plan_entry.get("parent_title")
+            parent_id = slug_map.get(parent_title) if parent_title else None
 
         tags = plan_entry.get("tags", [])
         if isinstance(tags, str):

@@ -348,8 +348,15 @@ async def save_answer(
 
     full_content = f"{chr(10).join(frontmatter_lines)}\n\n# {body.question}\n\n{body.answer}"
 
+    # Place under "Questions" folder if it exists
+    q_folder_result = await db.execute(
+        select(Note).where(Note.title == "Index: Questions")
+    )
+    q_folder = q_folder_result.scalar_one_or_none()
+    q_parent_id = q_folder.id if q_folder else None
+
     note = Note(
-        document_id=None, parent_id=None,
+        document_id=None, parent_id=q_parent_id,
         title=title, content=full_content, slug=slug,
         tags=json.dumps(tags), level=1,
         created_at=now.isoformat(), source="Q&A",

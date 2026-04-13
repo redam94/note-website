@@ -6,6 +6,9 @@ export interface GraphNode {
   tags: string[];
   degree: number;
   documentId: number | null;
+  nodeType?: "note" | "subgraph";
+  summary?: string | null;
+  clusterLabel?: string | null;
 }
 
 export interface GraphEdgeData {
@@ -26,7 +29,7 @@ export interface SearchResult {
   slug: string;
   excerpt: string;
   tags: string[];
-  matchType: "keyword" | "semantic";
+  matchType: "keyword" | "semantic" | "cluster";
   score: number;
 }
 

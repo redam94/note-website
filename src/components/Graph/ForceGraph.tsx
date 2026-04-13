@@ -27,7 +27,35 @@ const EDGE_COLORS: Record<string, string> = {
   example_of: "#b5a255",
   part_of: "#9b8fb5",
   references: "#a0a095",
+  cluster_link: "#6b8f9a",
 };
+
+// Node colors by note type (from type/* tags)
+const NODE_TYPE_COLORS: Record<string, string> = {
+  concept:    "#7a8c4e",  // olive green
+  definition: "#7b6b9e",  // purple
+  theorem:    "#4a7c9b",  // steel blue
+  example:    "#b5a255",  // amber
+  paper:      "#9a7a5a",  // warm brown
+  textbook:   "#6b7c3f",  // dark olive
+  tutorial:   "#5a9a7a",  // teal
+  qa:         "#9e8432",  // gold
+  index:      "#a0a095",  // gray
+};
+const DEFAULT_NODE_COLOR = "#8a9a5b";
+
+function getNodeType(tags: string[]): string {
+  for (const tag of tags) {
+    if (tag.startsWith("type/")) return tag.slice(5);
+  }
+  return "";
+}
+
+function getNodeColor(d: GraphNode): string {
+  if (d.nodeType === "subgraph") return "#5a7a8a";
+  const noteType = getNodeType(d.tags || []);
+  return NODE_TYPE_COLORS[noteType] || DEFAULT_NODE_COLOR;
+}
 
 export default function ForceGraph({
   data,
@@ -84,35 +112,38 @@ export default function ForceGraph({
 
     const simulation = d3
       .forceSimulation(nodes)
-      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(100))
-      .force("charge", d3.forceManyBody().strength(-200))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(30));
+      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(60).strength(0.15))
+      .force("charge", d3.forceManyBody().strength(-40).distanceMax(300))
+      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.03))
+      .force("collision", d3.forceCollide().radius((d: any) => nodeRadius(d) + 2).strength(0.4))
+      .alphaDecay(0.015);
 
-    // Edges
+    // Node radius helper
+    function nodeRadius(d: SimNode): number {
+      if (d.nodeType === "subgraph") return Math.max(6, Math.min(14, 6 + d.degree * 0.25));
+      return Math.max(1.8, Math.min(7, 1.8 + Math.sqrt(d.degree) * 1.4));
+    }
+
+    // Edges — thin, translucent lines
     const link = g
       .append("g")
       .selectAll("line")
       .data(links)
       .join("line")
-      .attr("stroke", (d) => EDGE_COLORS[d.relationship] || "#c0bdb5")
-      .attr("stroke-opacity", 0.4)
-      .attr("stroke-width", (d) => Math.max(0.8, d.confidence * 2));
+      .attr("stroke", "#c8c5bc")
+      .attr("stroke-opacity", 0.15)
+      .attr("stroke-width", 0.5);
 
-    // Nodes — muted olive tones by level
+    // Nodes — filled circles colored by note type
     const node = g
       .append("g")
       .selectAll("circle")
       .data(nodes)
       .join("circle")
-      .attr("r", (d) => Math.max(5, Math.min(16, 5 + d.degree * 1.5)))
-      .attr("fill", (d) => {
-        if (d.id === focusNodeId) return "#6b7c3f";
-        const levelColors = ["#8a9a5b", "#a0a095", "#b5a255"];
-        return levelColors[d.level - 1] || "#b5b0a3";
-      })
-      .attr("stroke", (d) => (d.id === focusNodeId ? "#5a6d2f" : "#e0ddd5"))
-      .attr("stroke-width", (d) => (d.id === focusNodeId ? 2.5 : 1))
+      .attr("r", (d) => nodeRadius(d))
+      .attr("fill", (d) => getNodeColor(d))
+      .attr("stroke", (d) => d.id === focusNodeId ? "#2c2a1f" : "none")
+      .attr("stroke-width", (d) => d.id === focusNodeId ? 2 : 0)
       .style("cursor", "pointer")
       .on("mouseenter", (_event, d) => {
         setHoveredNode(d.id);
@@ -124,19 +155,32 @@ export default function ForceGraph({
           if (s === d.id) neighborIds.add(t);
           if (t === d.id) neighborIds.add(s);
         });
-        node.attr("opacity", (n) => (neighborIds.has(n.id) ? 1 : 0.15));
-        link.attr("stroke-opacity", (l) => {
-          const s = (l.source as SimNode).id;
-          const t = (l.target as SimNode).id;
-          return s === d.id || t === d.id ? 0.7 : 0.04;
-        });
-        label.attr("opacity", (n) => (neighborIds.has(n.id) ? 1 : 0.08));
+        node.attr("opacity", (n) => (neighborIds.has(n.id) ? 1 : 0.12));
+        link
+          .attr("stroke-opacity", (l) => {
+            const s = (l.source as SimNode).id;
+            const t = (l.target as SimNode).id;
+            return s === d.id || t === d.id ? 0.5 : 0.03;
+          })
+          .attr("stroke", (l) => {
+            const s = (l.source as SimNode).id;
+            const t = (l.target as SimNode).id;
+            return s === d.id || t === d.id
+              ? (EDGE_COLORS[l.relationship] || "#8a9a5b")
+              : "#c8c5bc";
+          })
+          .attr("stroke-width", (l) => {
+            const s = (l.source as SimNode).id;
+            const t = (l.target as SimNode).id;
+            return s === d.id || t === d.id ? 1 : 0.5;
+          });
+        label.attr("opacity", (n) => (n.id === d.id ? 1 : 0));
       })
       .on("mouseleave", () => {
         setHoveredNode(null);
         node.attr("opacity", 1);
-        link.attr("stroke-opacity", 0.4);
-        label.attr("opacity", 0.8);
+        link.attr("stroke-opacity", 0.15).attr("stroke", "#c8c5bc").attr("stroke-width", 0.5);
+        label.attr("opacity", 0);
       })
       .on("click", (_event, d) => onNodeClick?.(d.slug))
       .call(
@@ -162,11 +206,11 @@ export default function ForceGraph({
       .data(nodes)
       .join("text")
       .text((d) => d.title)
-      .attr("font-size", 11)
-      .attr("dx", 14)
-      .attr("dy", 4)
-      .attr("fill", "#7a7565")
-      .attr("opacity", 0.8)
+      .attr("font-size", 9)
+      .attr("dx", (d) => nodeRadius(d) + 4)
+      .attr("dy", 3)
+      .attr("fill", "#5a5545")
+      .attr("opacity", 0)
       .attr("class", "select-none pointer-events-none");
 
     simulation.on("tick", () => {
@@ -186,10 +230,10 @@ export default function ForceGraph({
     <div className="relative w-full h-full overflow-hidden bg-[var(--bg)]">
       <svg ref={svgRef} width={width} height={height} className="w-full h-full" viewBox={`0 0 ${width} ${height}`} />
       <div className="absolute bottom-3 left-3 bg-[var(--surface)]/95 rounded-md p-2 text-xs space-y-1 border border-[var(--border)]">
-        {Object.entries(EDGE_COLORS).map(([type, color]) => (
+        {Object.entries(NODE_TYPE_COLORS).map(([type, color]) => (
           <div key={type} className="flex items-center gap-2">
-            <span className="inline-block w-3 h-0.5 rounded" style={{ backgroundColor: color }} />
-            <span className="text-[var(--text-secondary)]">{type.replace("_", " ")}</span>
+            <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+            <span className="text-[var(--text-secondary)]">{type}</span>
           </div>
         ))}
       </div>

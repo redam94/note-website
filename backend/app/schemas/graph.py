@@ -13,6 +13,9 @@ class GraphNode(BaseModel):
     tags: list[str]
     degree: int
     documentId: int | None
+    nodeType: str = "note"
+    summary: str | None = None
+    clusterLabel: str | None = None
 
 
 class GraphEdgeData(BaseModel):

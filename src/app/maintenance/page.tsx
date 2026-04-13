@@ -24,6 +24,7 @@ export default function MaintenancePage() {
   const [loading, setLoading] = useState("");
   const [results, setResults] = useState<string[]>([]);
   const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
+  const [clusters, setClusters] = useState<Array<{ id: number; label: string; path?: string | null; level?: number; summary: string | null; member_count: number }>>([]);
 
   async function runAudit() {
     setLoading("audit");
@@ -130,6 +131,44 @@ export default function MaintenancePage() {
     finally { setLoading(""); }
   }
 
+  async function runCleanupIndexes() {
+    setLoading("cleanup");
+    setResults([]);
+    try {
+      const res = await fetch("/api/maintenance/cleanup-indexes", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setResults([
+        `Removed ${data.removed} orphaned index notes`,
+        ...(data.details || []),
+      ]);
+    } catch (e: any) {
+      setResults([`Cleanup failed: ${e.message}`]);
+    } finally {
+      setLoading("");
+    }
+  }
+
+  async function runCommunityDetection() {
+    setLoading("community");
+    setResults([]);
+    setClusters([]);
+    try {
+      const res = await fetch("/api/community/detect", { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setClusters(data.clusters || []);
+      setResults([data.message || `Detected ${(data.clusters || []).length} communities`]);
+    } catch (e: any) {
+      setResults([`Community detection failed: ${e.message}`]);
+    } finally {
+      setLoading("");
+    }
+  }
+
   const btnClass = (active: string) =>
     `px-4 py-2.5 text-[13px] font-medium rounded-lg border transition-all ${
       loading === active
@@ -138,7 +177,7 @@ export default function MaintenancePage() {
     }`;
 
   return (
-    <div className="max-w-[740px] mx-auto px-8 py-8">
+    <div className="max-w-[740px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <h1 className="text-[24px] font-bold text-[var(--heading)] mb-2">
         Note Maintenance
       </h1>
@@ -147,7 +186,7 @@ export default function MaintenancePage() {
       </p>
 
       {/* Action buttons */}
-      <div className="grid grid-cols-2 gap-3 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-8">
         <button onClick={runAudit} disabled={!!loading} className={btnClass("audit")}>
           {loading === "audit" ? (
             <span className="inline-flex items-center gap-2">
@@ -203,6 +242,34 @@ export default function MaintenancePage() {
             </>
           )}
         </button>
+
+        <button onClick={runCleanupIndexes} disabled={!!loading} className={btnClass("cleanup")}>
+          {loading === "cleanup" ? (
+            <span className="inline-flex items-center gap-2">
+              <span className="w-3 h-3 border-2 border-[var(--accent)]/30 border-t-[var(--accent)] rounded-full animate-spin" />
+              Cleaning...
+            </span>
+          ) : (
+            <>
+              <span className="block text-[15px] mb-0.5">Cleanup Indexes</span>
+              <span className="text-[11px] opacity-70">Remove orphaned index notes</span>
+            </>
+          )}
+        </button>
+
+        <button onClick={runCommunityDetection} disabled={!!loading} className={btnClass("community")}>
+          {loading === "community" ? (
+            <span className="inline-flex items-center gap-2">
+              <span className="w-3 h-3 border-2 border-[var(--accent)]/30 border-t-[var(--accent)] rounded-full animate-spin" />
+              Detecting...
+            </span>
+          ) : (
+            <>
+              <span className="block text-[15px] mb-0.5">Detect Communities</span>
+              <span className="text-[11px] opacity-70">Cluster notes into topic groups</span>
+            </>
+          )}
+        </button>
       </div>
 
       {/* Operation results */}
@@ -237,6 +304,28 @@ export default function MaintenancePage() {
               New links: {repairResult.new_links.join(", ")}
             </p>
           )}
+        </div>
+      )}
+
+      {/* Community detection results */}
+      {clusters.length > 0 && (
+        <div className="mb-8">
+          <Section title={`Topic Clusters (${clusters.length})`}>
+            {clusters.map((c) => (
+              <div key={c.id} className="py-2.5 border-b border-[var(--border-light)] last:border-0" style={{ paddingLeft: `${(c.level || 0) * 16 + 4}px` }}>
+                <div className="flex items-center justify-between">
+                  <span className="text-[13px] font-medium text-[var(--text)]">{c.label}</span>
+                  <span className="text-[11px] text-[var(--muted)]">{c.member_count} notes</span>
+                </div>
+                {c.path && c.path !== c.label && (
+                  <p className="text-[11px] text-[var(--muted)] mt-0.5">{c.path}</p>
+                )}
+                {c.summary && (
+                  <p className="text-[12px] text-[var(--text-secondary)] mt-1">{c.summary}</p>
+                )}
+              </div>
+            ))}
+          </Section>
         </div>
       )}
 

@@ -24,6 +24,8 @@ class ProcessingState(TypedDict):
     note_plan: list[dict]
     existing_tags: list[str]
     existing_note_titles: list[str]
+    # Populated by ensure_tree node
+    folder_id_map: dict[str, int]
     # Populated by create_notes node
     created_notes: list[dict]
     # Populated by index_gen node
@@ -32,5 +34,7 @@ class ProcessingState(TypedDict):
     linked_notes: list[dict]
     # Populated by cross_link node
     cross_links: list[dict]
+    # Populated by community_update node
+    community_updates: list[dict]
     # Error tracking
     error: str | None

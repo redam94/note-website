@@ -21,3 +21,6 @@ class Note(Base):
     chapter = Column(Text, nullable=True)
     page = Column(Integer, nullable=True)
     summary = Column(Text, nullable=True)
+    cluster_id = Column(
+        Integer, ForeignKey("subgraph_nodes.id", ondelete="SET NULL"), nullable=True
+    )
