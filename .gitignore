@@ -47,3 +47,4 @@ __pycache__/
 *.pyc
 .next/
 *.sql
+.env.live
