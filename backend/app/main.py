@@ -20,8 +20,11 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("PRAGMA foreign_keys=ON"))
 
     # Recovery: resume interrupted documents from checkpoints
-    from .worker import resume_interrupted_documents
-    await resume_interrupted_documents()
+    try:
+        from .worker import resume_interrupted_documents
+        await resume_interrupted_documents()
+    except Exception as e:
+        logger.warning("Startup recovery skipped: %s", e)
 
     yield
     await engine.dispose()
