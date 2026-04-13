@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,12 +9,20 @@ from .config import settings
 from .database import engine
 from .routers import ask, auth, documents, graph, graph_tools, link, maintenance, notes, search, settings as settings_router
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # SQLite pragmas
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(text("PRAGMA foreign_keys=ON"))
+
+    # Recovery: resume interrupted documents from checkpoints
+    from .worker import resume_interrupted_documents
+    await resume_interrupted_documents()
+
     yield
     await engine.dispose()
 

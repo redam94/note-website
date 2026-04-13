@@ -50,12 +50,68 @@ export default function UploadForm() {
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const router = useRouter();
 
-  // Clean up polling on unmount
+  // On mount: check for in-progress documents and resume polling
   useEffect(() => {
+    async function checkInProgress() {
+      try {
+        const res = await fetch("/api/documents");
+        if (!res.ok) return;
+        const docs = await res.json();
+        const processing = docs.find(
+          (d: any) => d.status === "processing" || d.status === "pending"
+        );
+        if (processing) {
+          setUploading(true);
+          setDocStatus({
+            id: processing.id,
+            originalName: processing.originalName,
+            status: processing.status,
+            error: null,
+            processingStep: processing.processingStep || "Resuming...",
+            notesCount: processing.notesCount,
+          });
+          startPolling(processing.id);
+        }
+      } catch { /* ignore */ }
+    }
+    checkInProgress();
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  function startPolling(docId: number) {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const statusRes = await fetch("/api/documents");
+        if (!statusRes.ok) return;
+        const docs = await statusRes.json();
+        const current = docs.find((d: any) => d.id === docId);
+        if (!current) return;
+
+        setDocStatus({
+          id: current.id,
+          originalName: current.originalName,
+          status: current.status,
+          error: current.error,
+          processingStep: current.processingStep,
+          notesCount: current.notesCount,
+        });
+
+        if (current.status === "done") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setUploading(false);
+          window.dispatchEvent(new Event("sidebar-refresh"));
+          setTimeout(() => router.push("/"), 2500);
+        } else if (current.status === "error") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setError(current.error || "Processing failed");
+          setUploading(false);
+        }
+      } catch { /* ignore poll errors */ }
+    }, 1500);
+  }
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -93,38 +149,7 @@ export default function UploadForm() {
           notesCount: null,
         });
 
-        // Poll for updates
-        pollRef.current = setInterval(async () => {
-          try {
-            const statusRes = await fetch("/api/documents");
-            if (!statusRes.ok) return;
-            const docs = await statusRes.json();
-            const current = docs.find((d: any) => d.id === doc.id);
-            if (!current) return;
-
-            setDocStatus({
-              id: current.id,
-              originalName: current.originalName,
-              status: current.status,
-              error: current.error,
-              processingStep: current.processingStep,
-              notesCount: current.notesCount,
-            });
-
-            if (current.status === "done") {
-              if (pollRef.current) clearInterval(pollRef.current);
-              setUploading(false);
-              window.dispatchEvent(new Event("sidebar-refresh"));
-              setTimeout(() => router.push("/"), 2500);
-            } else if (current.status === "error") {
-              if (pollRef.current) clearInterval(pollRef.current);
-              setError(current.error || "Processing failed");
-              setUploading(false);
-            }
-          } catch {
-            // ignore poll errors
-          }
-        }, 1500);
+        startPolling(doc.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Upload failed");
         setUploading(false);
@@ -270,8 +295,14 @@ export default function UploadForm() {
 
       {/* Error */}
       {error && (
-        <div className="mt-4 p-3 rounded bg-[var(--danger)]/5 border border-[var(--danger)]/20 text-[var(--danger)] text-[13px]">
-          {error}
+        <div className="mt-4 p-3 rounded bg-[var(--danger)]/5 border border-[var(--danger)]/20 text-[13px]">
+          <p className="text-[var(--danger)]">{error}</p>
+          <button
+            onClick={() => { setError(null); setDocStatus(null); setUploading(false); }}
+            className="mt-2 px-3 py-1 text-[12px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
+          >
+            Try again
+          </button>
         </div>
       )}
     </div>

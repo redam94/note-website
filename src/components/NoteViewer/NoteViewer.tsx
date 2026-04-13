@@ -128,8 +128,8 @@ function parseContent(raw: string): ContentBlock[] {
       // Collect body lines — handle both > prefixed and bare continuation
       while (i < lines.length) {
         const line = lines[i];
-        if (line.match(/^>\s/)) {
-          // Standard blockquote continuation
+        if (line.match(/^>\s/) || line === ">") {
+          // Standard blockquote continuation ("> text" or bare ">")
           bodyLines.push(line.replace(/^>\s?/, ""));
           i++;
         } else if (!hasQuotePrefix && line.trim() && !line.match(/^(#{1,4}\s|>\s*\[!|\[!)/) && !line.match(/^\s*$/)) {

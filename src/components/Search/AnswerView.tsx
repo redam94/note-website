@@ -67,7 +67,7 @@ function parseAnswer(raw: string): Block[] {
       i++;
       while (i < lines.length) {
         const line = lines[i];
-        if (line.match(/^>\s/)) {
+        if (line.match(/^>\s/) || line === ">") {
           bodyLines.push(line.replace(/^>\s?/, ""));
           i++;
         } else if (!hasQuotePrefix && line.trim() && !line.match(/^(#{1,4}\s|>\s*\[!|\[!)/) && !line.match(/^\s*$/)) {

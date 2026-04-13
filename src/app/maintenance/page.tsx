@@ -37,11 +37,25 @@ export default function MaintenancePage() {
   }
 
   async function pollJob(jobId: string, label: string) {
+    let missCount = 0;
     const poll = setInterval(async () => {
       try {
         const res = await fetch(`/api/maintenance/jobs/${jobId}`);
         if (!res.ok) return;
         const job = await res.json();
+
+        // Job lost (server restarted)
+        if (job.status === "not_found") {
+          missCount++;
+          if (missCount >= 3) {
+            clearInterval(poll);
+            setLoading("");
+            setResults(["Job was interrupted by server restart. Try again."]);
+          }
+          return;
+        }
+        missCount = 0;
+
         setResults((prev) => {
           const base = prev.filter((r) => !r.startsWith("⏳"));
           return [`⏳ ${job.progress}`, ...base];

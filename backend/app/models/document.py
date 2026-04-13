@@ -13,6 +13,8 @@ class Document(Base):
     content_raw = Column(Text, nullable=True)
     status = Column(Text, nullable=False, default="pending")
     error = Column(Text, nullable=True)
-    processing_step = Column(Text, nullable=True)  # current pipeline step description
-    notes_count = Column(Integer, nullable=True)    # number of notes created so far
+    processing_step = Column(Text, nullable=True)
+    notes_count = Column(Integer, nullable=True)
+    checkpoint = Column(Text, nullable=True)  # JSON-serialized pipeline state for resumption
+    last_completed_node = Column(Text, nullable=True)  # e.g., "outline", "plan", "create_notes"
     created_at = Column(Text, nullable=False)

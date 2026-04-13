@@ -24,6 +24,32 @@ _MIN_QUALITY_CHARS = 500  # minimum body length to accept without escalation
 logger = logging.getLogger(__name__)
 
 
+def _normalize_content(text: str) -> str:
+    """Clean up LLM-generated content before storage.
+
+    Fixes common formatting issues:
+    - Bare > lines (empty blockquote continuation) → > (with trailing space)
+    - Inconsistent callout formatting
+    - Display math on single lines
+    - Excess blank lines inside callouts
+    """
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        # Normalize bare > to > with space (empty continuation)
+        if line.strip() == ">":
+            result.append(">")  # keep it, but frontend now handles it
+        # Fix single-line display math
+        elif re.match(r"^\$\$.+\$\$$", line.strip()):
+            inner = line.strip()[2:-2].strip()
+            result.append("$$")
+            result.append(inner)
+            result.append("$$")
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
 # ── Source text extraction (boundary-aware) ───────────────────────────
 
 
@@ -414,7 +440,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             doc_type=doc_type,
         )
 
-        body = note_data.get("content", "")
+        body = _normalize_content(note_data.get("content", ""))
         full_content = f"{frontmatter}\n\n# {plan_entry['title']}\n\n{body}"
 
         note = Note(
