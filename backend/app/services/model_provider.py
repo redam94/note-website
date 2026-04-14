@@ -13,8 +13,10 @@ DEFAULTS = {
     "openai_api_key": "",
     "google_api_key": "",
     "lmstudio_base_url": "http://localhost:1234/v1",
-    "model_outline":   "claude-haiku-4-5",
-    "model_plan":      "claude-sonnet-4-6",
+    "model_outline":       "claude-haiku-4-5",
+    "model_macro_plan":   "claude-haiku-4-5",
+    "model_chapter_plan": "claude-sonnet-4-6",
+    "model_plan":          "claude-sonnet-4-6",  # legacy fallback
     "model_create":    "claude-haiku-4-5",
     "model_links":     "claude-haiku-4-5",
     "model_crosslink": "claude-haiku-4-5",

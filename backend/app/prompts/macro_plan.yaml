@@ -1,0 +1,118 @@
+section_order:
+  - role
+  - task
+  - skip_guidance
+  - grouping_rules
+  - folder_rules
+  - output_schema
+
+sections:
+  role:
+    template: >-
+      You are a document analyst deciding which parts of a document deserve
+      detailed notes in an Obsidian-style knowledge base and how those notes
+      should be structured.
+
+  task:
+    template: |-
+      Document: {doc_name}
+      Document type: {doc_type}
+      Total pages: {total_pages}
+
+      Below is the full document outline. For each level-1 section decide:
+      1. Is it worth extracting notes from? (high-value vs. skip)
+      2. If high-value, how many notes should it produce and how should subsections
+         be grouped?
+
+      Outline (JSON):
+      {outline_json}
+
+    required_vars:
+      - doc_name
+      - doc_type
+      - total_pages
+      - outline_json
+
+  skip_guidance:
+    template: |-
+      Sections to SKIP (produce NO notes):
+
+      Python pre-filter has already flagged these as low-value:
+      {pre_flagged_sections}
+
+      Also skip any section whose title matches:
+      - Bibliography, References, Works Cited
+      - Index, Indices
+      - Acknowledgements, Acknowledgments
+      - Table of Contents, Contents
+      - List of Figures / Tables / Symbols / Abbreviations
+      - Glossary (unless it IS the primary content of the document)
+      - Foreword, Preface, About the Author(s), Colophon, Errata, Copyright
+      - Appendix A/B/C... (supplemental appendices — skip UNLESS the document
+        type is "textbook" and the appendix contains substantial worked examples
+        or proofs)
+
+      Do NOT skip: Introduction, Summary, Conclusion, Discussion — these are
+      high-value regardless of their name.
+
+    required_vars:
+      - pre_flagged_sections
+
+  grouping_rules:
+    template: |-
+      Grouping strategy per high-value chapter:
+
+      Choose ONE of three subsection strategies:
+      - "one_for_chapter"      — The chapter is short or cohesive; write ONE note
+                                 covering the entire chapter.
+      - "one_per_subsection"   — Each subsection is a standalone concept; write one
+                                 note per level-2 subsection.
+      - "group"                — The chapter has many thin subsections; group related
+                                 ones into 2-5 composite notes, each covering 2-4
+                                 subsections.  Provide a grouping_hint describing
+                                 which subsections to combine.
+
+      Guidelines:
+      - Use "one_for_chapter" when the chapter has 0–2 subsections or ≤ 6 pages.
+      - Use "group" when the chapter has ≥ 6 subsections OR when subsections are
+        clearly paired (e.g., "Definition" + "Properties" + "Examples").
+      - Use "one_per_subsection" when each subsection is a self-contained concept
+        (e.g., each subsection is a distinct theorem or algorithm).
+      - estimated_notes should reflect the strategy (1 for one_for_chapter, etc.)
+
+  folder_rules:
+    template: |-
+      Folder assignment:
+
+      - folder_root is the top-level folder name for ALL notes from this document
+        (e.g., "Linear Algebra" for a linear algebra textbook).
+      - Each high_value_chapters entry gets a "folder" field: the full path where
+        notes for that chapter live (e.g., "Linear Algebra/Vector Spaces").
+      - Use the document's own hierarchy as the folder structure.
+      - Reuse sensible academic naming (prefer "Probability Theory" over "Chapter 3").
+
+  output_schema:
+    template: |-
+      Return ONLY valid JSON — no prose, no markdown fences:
+      {{
+        "doc_summary": "One-sentence description of what this document covers",
+        "folder_root": "TopLevelFolderName",
+        "high_value_chapters": [
+          {{
+            "title": "EXACT title from outline (must match exactly)",
+            "subsection_strategy": "group",
+            "grouping_hint": "Combine 'Intro' and 'Motivation'; keep 'Main Theorem' standalone",
+            "estimated_notes": 3,
+            "folder": "TopLevelFolder/ChapterSubfolder"
+          }}
+        ],
+        "skip_sections": [
+          {{
+            "title": "EXACT title from outline (must match exactly)",
+            "reason": "bibliography"
+          }}
+        ]
+      }}
+
+      IMPORTANT: every "title" must be an EXACT string from the outline JSON provided.
+      Do not paraphrase, abbreviate, or alter the titles.

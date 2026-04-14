@@ -1,6 +1,18 @@
+"""Chapter-plan node: per-chapter parallel note planning.
+
+Runs after macro_plan.  For each high-value chapter identified by the macro
+plan, spawns a parallel LLM call that plans the exact notes to create, with:
+- sections: list[str] (which subsections each note covers)
+- Accurate page ranges computed in Python from section_boundaries
+- Coverage enforcement ensuring every chapter subsection appears in a note
+"""
+
 from __future__ import annotations
 
+import asyncio
+import bisect
 import json
+import logging
 import re
 
 from sqlalchemy import select
@@ -12,12 +24,255 @@ from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
 
-def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
-    """Build a minimal note plan from the outline when the LLM response is unusable.
+logger = logging.getLogger(__name__)
 
-    Level-1 sections map to top-level folders named after the document.
-    Level-2 sections get a sub-folder under their nearest level-1 parent.
+
+# ── Page-range computation (pure Python) ─────────────────────────────
+
+
+def _build_char_page_map(page_texts: list[dict]) -> list[int]:
+    """Return cumulative end-char offset per page (0-indexed list)."""
+    offsets: list[int] = []
+    total = 0
+    for pt in page_texts:
+        total += len(pt.get("text", ""))
+        offsets.append(total)
+    return offsets
+
+
+def _char_to_page(char_offset: int, cumulative: list[int]) -> int:
+    """1-indexed page number for a character offset."""
+    idx = bisect.bisect_right(cumulative, char_offset)
+    return min(idx + 1, len(cumulative))
+
+
+def _compute_page_range(
+    sections: list[str],
+    section_boundaries: list[dict],
+    char_page_map: list[int],
+    fallback_page: int = 1,
+) -> tuple[int, int]:
+    """Return (page_start, page_end) for a list of section titles."""
+    if not sections or not section_boundaries or not char_page_map:
+        return fallback_page, fallback_page
+
+    sections_lower = {s.lower().strip() for s in sections}
+    matches = [
+        b for b in section_boundaries
+        if b.get("title", "").lower().strip() in sections_lower
+    ]
+    if not matches:
+        return fallback_page, fallback_page
+
+    page_start = min(b.get("page", fallback_page) for b in matches)
+    max_end_char = max(b.get("end_char", 0) for b in matches)
+    page_end = _char_to_page(max_end_char, char_page_map)
+    return page_start, max(page_end, page_start)
+
+
+# ── Outline grouping ──────────────────────────────────────────────────
+
+
+def _group_outline_by_chapter(
+    outline: list[dict],
+    high_value_chapters: list[dict],
+    skipped: set[str],
+) -> dict[str, list[dict]]:
+    """Map chapter title → its level-2+ subsections from the outline.
+
+    Walks the outline in order; each level-1 section starts a new chapter
+    bucket.  Level-2+ sections are appended to the current bucket.
+    Skipped chapter titles and their subsections are omitted.
     """
+    chapter_titles = {ch["title"] for ch in high_value_chapters}
+    result: dict[str, list[dict]] = {ch["title"]: [] for ch in high_value_chapters}
+
+    current_chapter: str | None = None
+    include_current = False
+
+    for section in outline:
+        level = section.get("level", 1)
+        title = section.get("title", "").strip()
+
+        if level == 1:
+            current_chapter = title
+            include_current = title in chapter_titles and title not in skipped
+        elif include_current and current_chapter:
+            result.setdefault(current_chapter, []).append(section)
+
+    return result
+
+
+# ── Per-chapter LLM planning ──────────────────────────────────────────
+
+
+async def _plan_one_chapter(
+    chapter_info: dict,
+    chapter_outline: list[dict],
+    state: ProcessingState,
+    provider,
+    model: str,
+    existing_tags_list: list[str],
+    existing_titles: list[str],
+    char_page_map: list[int],
+    doc_type: str,
+    tree_text: str,
+    index_notes: list,
+) -> list[dict]:
+    """Plan notes for a single chapter.  Returns a list of note plan entries."""
+    chapter_title = chapter_info["title"]
+    chapter_folder = chapter_info.get("folder", chapter_title)
+    subsection_strategy = chapter_info.get("subsection_strategy", "one_per_subsection")
+    grouping_hint = chapter_info.get("grouping_hint", "")
+    original_name = state["original_name"]
+    section_boundaries = state.get("section_boundaries", [])
+
+    # Subsections available in this chapter
+    chapter_sections_json = json.dumps(
+        [{"title": s["title"], "level": s["level"], "page_start": s.get("page_start", 1)}
+         for s in chapter_outline],
+        indent=2,
+    )
+
+    # Build prompt (chapter-scoped)
+    prompt_builder = (
+        load_prompt_builder("plan")
+        .include("role", "doc_type_strategy", "chapter_context",
+                 "tag_rules", "callout_planning", "dependency_rules", "output_schema")
+        .include_if(doc_type == "textbook", "textbook_rules")
+        .include_if(doc_type == "paper", "paper_rules")
+        .include_if(doc_type == "tutorial", "tutorial_rules")
+        .include_if(bool(index_notes), "existing_tree")
+        .include_if(bool(index_notes), "hierarchy_rules")
+    )
+    system_template = prompt_builder.build()
+
+    fmt_vars: dict = {
+        "doc_type": doc_type,
+        "chapter_title": chapter_title,
+        "chapter_folder": chapter_folder,
+        "subsection_strategy": subsection_strategy,
+        "grouping_hint": grouping_hint or "Follow the subsection_strategy.",
+        "chapter_sections_json": chapter_sections_json,
+    }
+    if index_notes:
+        fmt_vars["existing_tree"] = tree_text
+
+    system_prompt = system_template.format(**fmt_vars)
+
+    user_prompt = (
+        f"Document: {original_name}\n"
+        f"Document type: {doc_type}\n"
+        f"Chapter: {chapter_title}\n\n"
+        f"Existing tags: {json.dumps(existing_tags_list)}\n\n"
+        f"Existing notes for depends_on/used_by:\n"
+        + "\n".join(f"- {t}" for t in existing_titles[:40])
+        + f"\n\nPlan the notes for this chapter."
+    )
+
+    note_plan_entries: list[dict] = []
+    try:
+        response = await provider.complete(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+            max_tokens=4096,
+            model=model,
+        )
+        json_match = re.search(r"\{.*\}", response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+        else:
+            data = json.loads(response)
+        note_plan_entries = data.get("notes", [])
+    except Exception as exc:
+        logger.warning("Chapter plan LLM failed for '%s': %s", chapter_title, exc)
+
+    # Validate sections references — drop refs to sections not in this chapter
+    valid_section_titles = {s["title"].lower().strip() for s in chapter_outline}
+    for entry in note_plan_entries:
+        raw_sections = entry.get("sections") or []
+        entry["sections"] = [
+            s for s in raw_sections
+            if s.lower().strip() in valid_section_titles
+        ]
+        # Ensure folder is set
+        if not (entry.get("folder") or "").strip():
+            entry["folder"] = chapter_folder
+
+    # ── Coverage enforcement ──────────────────────────────────────────
+    # Every subsection in chapter_outline must appear in at least one note
+    covered_sections: set[str] = {
+        s.lower().strip()
+        for entry in note_plan_entries
+        for s in entry.get("sections", [])
+    }
+    for section in chapter_outline:
+        section_title = section.get("title", "").strip()
+        if not section_title:
+            continue
+        if section_title.lower().strip() not in covered_sections:
+            note_plan_entries.append({
+                "title": section_title,
+                "folder": chapter_folder,
+                "sections": [section_title],
+                "tags": [],
+                "page_start": section.get("page_start", 1),
+                "page_end": section.get("page_start", 1),
+                "level": section.get("level", 2),
+                "scope": f"Content from the '{section_title}' section.",
+                "doc_type": "concept",
+                "has_definitions": False,
+                "has_theorems": False,
+                "has_math": False,
+                "depends_on": [],
+                "used_by": [],
+            })
+            covered_sections.add(section_title.lower().strip())
+
+    # ── Page range computation (pure Python) ─────────────────────────
+    for entry in note_plan_entries:
+        sections = entry.get("sections") or []
+        llm_page_start = entry.get("page_start") or 1
+        computed_start, computed_end = _compute_page_range(
+            sections, section_boundaries, char_page_map, llm_page_start
+        )
+        entry["page_start"] = computed_start
+        entry["page_end"] = computed_end
+        # Legacy compat field
+        entry["page"] = computed_start
+        # chapter field for backward compat: join section titles
+        entry["chapter"] = "; ".join(sections) if sections else chapter_title
+
+    return note_plan_entries
+
+
+# ── Helper: build tree text from index notes ──────────────────────────
+
+
+def _build_tree_text(index_notes: list) -> str:
+    if not index_notes:
+        return "(empty — no topics yet)"
+    paths: list[str] = []
+    for n in index_notes:
+        path = n.title.removeprefix("Index: ").strip()
+        if path:
+            paths.append(path)
+    if not paths:
+        return "(empty — no topics yet)"
+    paths.sort(key=lambda p: (p.count("/"), p))
+    lines = []
+    for path in paths:
+        depth = path.count("/")
+        leaf = path.rsplit("/", 1)[-1] if "/" in path else path
+        lines.append("  " * depth + f"- {leaf}/")
+    return "\n".join(lines)
+
+
+# ── Fallback plan helpers (kept for backward compat / escalation) ─────
+
+
+def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
+    """Build a minimal note plan from the outline when LLM response is unusable."""
     plan = []
     current_l1_title = doc_name
 
@@ -35,10 +290,12 @@ def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
 
         plan.append({
             "title": title,
-            "parent_title": None,
             "folder": folder,
-            "tags": [],
+            "sections": [title],
             "chapter": title,
+            "tags": [],
+            "page_start": section.get("page_start", 1),
+            "page_end": section.get("page_start", 1),
             "page": section.get("page_start", 1),
             "level": level,
             "scope": section.get("snippet", ""),
@@ -53,33 +310,21 @@ def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
 
 
 def _backfill_folders(note_plan: list[dict], doc_name: str) -> None:
-    """Fill empty `folder` fields in-place using surrounding context.
-
-    Strategy:
-    - Collect all non-empty folders already assigned by the LLM.
-    - For entries with empty/missing folder: look for the nearest preceding
-      entry (by index) that has the same level and a non-empty folder.
-      If none found, build `doc_name/chapter` as a safe default.
-    """
-    # Index of (level, folder) for entries that have a folder
+    """Fill empty `folder` fields in-place using surrounding context."""
     level_folder: dict[int, str] = {}
-
     for entry in note_plan:
         folder = (entry.get("folder") or "").strip()
         level = entry.get("level", 1)
         if folder:
-            level_folder[level] = folder  # update running latest per level
+            level_folder[level] = folder
 
-    # Second pass: fill blanks
     running: dict[int, str] = {}
     for entry in note_plan:
         folder = (entry.get("folder") or "").strip()
         level = entry.get("level", 1)
-
         if folder:
             running[level] = folder
         else:
-            # Try: same level from running window, then parent level, then fallback
             inferred = (
                 running.get(level)
                 or running.get(level - 1)
@@ -93,119 +338,44 @@ def _backfill_folders(note_plan: list[dict], doc_name: str) -> None:
             running[level] = inferred
 
 
-def _infer_folder_for_section(
-    section: dict, note_plan: list[dict], doc_name: str
-) -> str:
-    """Return a folder path for an injected coverage-gap note.
-
-    Looks for an existing plan entry covering the same outline level and
-    reuses its folder.  Falls back to doc_name/{section_title}.
-    """
-    level = section.get("level", 1)
-    section_title = section.get("title", "").strip()
-
-    # Look for any already-planned note at the same level with a non-empty folder
-    for entry in note_plan:
-        if entry.get("level") == level and (entry.get("folder") or "").strip():
-            return (entry.get("folder") or "").strip()
-
-    # Fall back to a simple path derived from the document + section title
-    return f"{doc_name}/{section_title}" if level > 1 else doc_name
+# ── Main node ─────────────────────────────────────────────────────────
 
 
-_UNUSED = """\
-You are a knowledge management planner creating a note extraction plan for an Obsidian-style \
-knowledge base that uses wiki-links, callouts, and LaTeX math.
+async def create_chapter_plans(state: ProcessingState) -> ProcessingState:
+    """Plan notes chapter-by-chapter with parallel LLM calls."""
+    await set_step(state["document_id"], "Planning notes by chapter...")
 
-Given a document outline and existing tags/notes, plan what notes should be created.
-
-Rules:
-- Each note covers ONE topic and should be self-contained
-- Reuse existing tags when relevant; only create new tags if no existing tag fits
-- Notes form a hierarchy: level 1 (broad topic), level 2 (subtopic), level 3 (atomic note)
-- Identify which notes will need:
-  - `[!definition]` callouts (formal definitions)
-  - `[!theorem]` callouts (mathematical theorems, propositions)
-  - `[!example]` callouts (concrete examples)
-  - LaTeX math (formulas, equations)
-- Plan `depends_on` relationships (what prior knowledge is needed)
-
-Return ONLY valid JSON:
-{
-  "notes": [
-    {
-      "title": "Note Title",
-      "parent_title": null,
-      "tags": ["tag1", "tag2"],
-      "chapter": "Chapter/Section Name",
-      "page": 1,
-      "level": 1,
-      "scope": "What this note should cover",
-      "doc_type": "concept",
-      "has_definitions": true,
-      "has_theorems": false,
-      "has_math": true,
-      "depends_on": ["Other Note Title"],
-      "used_by": []
-    }
-  ]
-}
-
-doc_type options: concept, definition, theorem, paper, textbook, tutorial
-"""
-
-
-def _build_tree_text(index_notes: list) -> str:
-    """Reconstruct the topic tree as indented text from index notes."""
-    if not index_notes:
-        return "(empty — no topics yet)"
-
-    paths: list[str] = []
-
-    for n in index_notes:
-        # Extract path from title: "Index: Statistics/Bayesian Methods" -> "Statistics/Bayesian Methods"
-        path = n.title.removeprefix("Index: ").strip()
-        if path:
-            paths.append(path)
-
-    if not paths:
-        return "(empty — no topics yet)"
-
-    # Sort by depth then alphabetically for clean indented output
-    paths.sort(key=lambda p: (p.count("/"), p))
-    lines = []
-    for path in paths:
-        depth = path.count("/")
-        leaf = path.rsplit("/", 1)[-1] if "/" in path else path
-        lines.append("  " * depth + f"- {leaf}/")
-
-    return "\n".join(lines)
-
-
-async def create_plan(state: ProcessingState) -> ProcessingState:
-    """Plan what notes to create based on the outline."""
-    await set_step(state["document_id"], "Planning note extraction...")
-    outline = state["outline"]
+    macro_plan = state.get("macro_plan") or {}
+    skipped = set(state.get("skipped_sections") or [])
     original_name = state["original_name"]
+    outline = state["outline"]
+    page_texts = state.get("page_texts", [])
+    section_boundaries = state.get("section_boundaries", [])
 
-    # Fetch existing tags, note titles, and topic tree from DB
+    high_value_chapters: list[dict] = macro_plan.get("high_value_chapters", [])
+
+    # If macro plan produced no chapters, use full outline as fallback
+    if not high_value_chapters:
+        logger.warning("No high_value_chapters in macro_plan — falling back to full outline")
+        note_plan = _build_fallback_plan(outline, original_name)
+        _backfill_folders(note_plan, original_name)
+        return {**state, "note_plan": note_plan, "existing_tags": [], "existing_note_titles": []}
+
+    # Fetch DB data
     async with async_session() as db:
         tags_result = await db.execute(select(Note.tags).where(Note.space_id == state["space_id"]))
         all_tags_raw = tags_result.scalars().all()
 
         titles_result = await db.execute(select(Note.title).where(Note.space_id == state["space_id"]))
-        existing_titles = [t for t in titles_result.scalars().all()]
+        existing_titles = list(titles_result.scalars().all())
 
-        # Query existing index notes for the topic tree
         index_result = await db.execute(
             select(Note).where(Note.title.like("Index: %")).where(Note.space_id == state["space_id"])
         )
         index_notes = index_result.scalars().all()
 
         provider = await get_provider(db)
-        model = await get_setting(db, "model_plan")
-
-    tree_text = _build_tree_text(index_notes)
+        model = await get_setting(db, "model_chapter_plan")
 
     existing_tags: set[str] = set()
     for tags_raw in all_tags_raw:
@@ -215,129 +385,58 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
                 existing_tags.update(tags)
             except (json.JSONDecodeError, TypeError):
                 pass
-
     existing_tags_list = sorted(existing_tags)
 
-    # Build snippets from page_texts for context
-    snippets = []
-    for section in outline[:15]:
-        page = section.get("page_start", 1)
-        page_texts = state["page_texts"]
-        if page <= len(page_texts):
-            text = page_texts[page - 1]["text"]
-            snippets.append(f"## {section['title']} (page {page})\n{text[:400]}...")
-
-    # Include pre-extracted structure metadata
-    structure_info = ""
-    tables = state.get("extracted_tables", [])
-    equations = state.get("extracted_equations", [])
-    definitions = state.get("extracted_definitions", [])
-    if tables:
-        structure_info += f"\n\nPre-extracted: {len(tables)} tables found in document."
-    if equations:
-        display_count = sum(1 for e in equations if e.get("type") == "display")
-        structure_info += f"\n{display_count} display equations, {len(equations) - display_count} inline math expressions."
-    if definitions:
-        def_terms = [d["term"] for d in definitions[:10]]
-        structure_info += f"\nDefinition-like patterns detected for: {', '.join(def_terms)}"
-
-    # Build system prompt — conditional sections based on doc_type and state
+    tree_text = _build_tree_text(index_notes)
     doc_type = state.get("doc_type", "article")
+    char_page_map = _build_char_page_map(page_texts)
 
-    prompt = (
-        f"Document: {original_name}\n"
-        f"Document type: {doc_type}\n\n"
-        f"Existing tags in knowledge base: {json.dumps(existing_tags_list)}\n\n"
-        f"Existing notes in knowledge base (for depends_on/used_by references):\n"
-        + "\n".join(f"- {t}" for t in existing_titles[:50])
-        + f"\n\nDocument outline:\n{json.dumps(outline, indent=2)}\n\n"
-        f"Section previews:\n{''.join(snippets)}"
-        f"{structure_info}\n\n"
-        "Create a plan for extracting notes. Consider which notes need definitions, "
-        "theorems, math, and examples. Plan the dependency relationships."
-    )
-    plan_prompt_builder = (
-        load_prompt_builder("plan")
-        .include("role", "doc_type_strategy", "hierarchy_rules", "tag_rules",
-                 "callout_planning", "dependency_rules", "output_schema")
-        .include_if(doc_type == "textbook", "textbook_rules")
-        .include_if(doc_type == "paper", "paper_rules")
-        .include_if(doc_type == "tutorial", "tutorial_rules")
-        .include_if(bool(index_notes), "existing_tree")
-    )
-    plan_template = plan_prompt_builder.build()
-    fmt_vars: dict = {"doc_type": doc_type}
-    if index_notes:
-        fmt_vars["existing_tree"] = tree_text
-    PLAN_SYSTEM = plan_template.format(**fmt_vars)
+    # Group outline subsections by chapter
+    chapter_sections = _group_outline_by_chapter(outline, high_value_chapters, skipped)
 
-    try:
-        response = await provider.complete(
-            messages=[{"role": "user", "content": prompt}],
-            system=PLAN_SYSTEM,
-            max_tokens=8192,
-            model=model,
-        )
-        json_match = re.search(r"\{.*\}", response, re.DOTALL)
-        if json_match:
-            plan_data = json.loads(json_match.group())
-        else:
-            plan_data = json.loads(response)
-        note_plan = plan_data.get("notes", [])
-    except (json.JSONDecodeError, Exception):
-        # Fallback: create one note per outline section, building folders from
-        # the outline hierarchy so notes are properly placed in the tree.
+    # Parallel chapter planning with concurrency limit
+    sem = asyncio.Semaphore(6)
+
+    async def _throttled(ch_info: dict) -> list[dict] | Exception:
+        async with sem:
+            try:
+                return await _plan_one_chapter(
+                    chapter_info=ch_info,
+                    chapter_outline=chapter_sections.get(ch_info["title"], []),
+                    state=state,
+                    provider=provider,
+                    model=model,
+                    existing_tags_list=existing_tags_list,
+                    existing_titles=existing_titles,
+                    char_page_map=char_page_map,
+                    doc_type=doc_type,
+                    tree_text=tree_text,
+                    index_notes=index_notes,
+                )
+            except Exception as exc:
+                logger.warning("Chapter plan failed for '%s': %s", ch_info.get("title"), exc)
+                return exc
+
+    results = await asyncio.gather(
+        *[_throttled(ch) for ch in high_value_chapters],
+        return_exceptions=True,
+    )
+
+    note_plan: list[dict] = []
+    for r in results:
+        if isinstance(r, list):
+            note_plan.extend(r)
+        # Exceptions already logged in _throttled
+
+    # If all chapters failed, fall back to full outline
+    if not note_plan:
+        logger.warning("All chapter plans failed — falling back to full outline plan")
         note_plan = _build_fallback_plan(outline, original_name)
 
     # ── Folder backfill ───────────────────────────────────────────────
-    # Some LLM responses omit the `folder` field or return an empty string.
-    # Fill those gaps using a heuristic based on what nearby notes were assigned.
-    _backfill_folders(note_plan, original_name)
-
-    # ── Coverage enforcement ──────────────────────────────────────────
-    # For every level-1 and level-2 outline section, ensure at least one
-    # planned note has its "chapter" field matching that section.  This
-    # mechanical check means section coverage is guaranteed regardless of
-    # what the LLM chose to include.
-    planned_chapters: set[str] = {
-        (p.get("chapter") or "").strip().lower()
-        for p in note_plan
-        if p.get("chapter")
-    }
-    injected = 0
-    for section in outline:
-        if section.get("level", 1) > 2:
-            continue
-        section_title = section.get("title", "").strip()
-        if not section_title:
-            continue
-        if section_title.lower() not in planned_chapters:
-            # Infer a folder from existing plan entries for similar-level sections
-            inferred_folder = _infer_folder_for_section(
-                section, note_plan, original_name
-            )
-            note_plan.append({
-                "title": section_title,
-                "parent_title": None,
-                "folder": inferred_folder,
-                "tags": [],
-                "chapter": section_title,
-                "page": section.get("page_start", 1),
-                "level": section.get("level", 1),
-                "scope": section.get("snippet", f"Content from the '{section_title}' section."),
-                "doc_type": "concept",
-                "has_definitions": False,
-                "has_theorems": False,
-                "has_math": False,
-                "depends_on": [],
-                "used_by": [],
-            })
-            planned_chapters.add(section_title.lower())
-            injected += 1
+    _backfill_folders(note_plan, macro_plan.get("folder_root", original_name))
 
     # ── Bidirectional dependency enforcement ──────────────────────────
-    # For every A.depends_on B, ensure B.used_by includes A (and vice-versa).
-    # This is pure Python — no LLM trust required.
     title_to_plan: dict[str, dict] = {p["title"]: p for p in note_plan}
     for entry in note_plan:
         title = entry["title"]
@@ -352,13 +451,11 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
                 if title not in deps:
                     deps.append(title)
 
-    if injected:
-        await set_step(
-            state["document_id"],
-            f"Planned {len(note_plan)} notes ({injected} sections auto-added for full coverage)",
-        )
-    else:
-        await set_step(state["document_id"], f"Planned {len(note_plan)} notes to create")
+    await set_step(
+        state["document_id"],
+        f"Planned {len(note_plan)} notes across {len(high_value_chapters)} chapters",
+    )
+    logger.info("Chapter plans complete: %d notes planned", len(note_plan))
 
     return {
         **state,
@@ -366,3 +463,7 @@ async def create_plan(state: ProcessingState) -> ProcessingState:
         "existing_tags": existing_tags_list,
         "existing_note_titles": existing_titles,
     }
+
+
+# Alias so old checkpoints importing create_plan still resolve
+create_plan = create_chapter_plans

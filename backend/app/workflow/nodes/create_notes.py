@@ -143,6 +143,7 @@ def _get_section_text(
     page: int,
     outline: list[dict] | None = None,
     chapter: str | None = None,
+    sections: list[str] | None = None,
     section_boundaries: list[dict] | None = None,
     extracted_tables: list[dict] | None = None,
     extracted_equations: list[dict] | None = None,
@@ -150,13 +151,31 @@ def _get_section_text(
 ) -> str:
     """Extract source text for a note using the best available method.
 
-    Priority: char offsets > outline page ranges > page ± window.
+    Priority: multi-section char offsets > single chapter offset >
+              outline page ranges > page ± window.
     Appends relevant tables and equations if available.
     """
     main_text = ""
 
-    # Method 1: Character offsets from section_boundaries (most precise)
-    if section_boundaries and chapter:
+    # Method 1a: Multi-section character offsets (new two-phase plan format)
+    if section_boundaries and sections:
+        sections_lower = {s.lower().strip() for s in sections}
+        parts = []
+        total = 0
+        for b in section_boundaries:
+            if b.get("title", "").lower().strip() in sections_lower:
+                chunk = raw_text[b["start_char"]:b["end_char"]]
+                if total + len(chunk) > max_chars:
+                    parts.append(chunk[:max_chars - total])
+                    total = max_chars
+                    break
+                parts.append(chunk)
+                total += len(chunk)
+        if parts:
+            main_text = "\n\n".join(parts)
+
+    # Method 1b: Single-section character offset (backward compat)
+    if not main_text and section_boundaries and chapter:
         chapter_lower = chapter.lower().strip()
         for b in section_boundaries:
             if b["title"].lower().strip() == chapter_lower or chapter_lower in b["title"].lower():
@@ -344,16 +363,20 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
     async def _generate_one(idx: int, plan_entry: dict) -> tuple[int, dict, NoteOutput, bool]:
         nonlocal completed
         async with sem:
-            page = plan_entry.get("page", 1)
+            page = plan_entry.get("page_start") or plan_entry.get("page", 1)
+            page_end = plan_entry.get("page_end") or page
             chapter = plan_entry.get("chapter")
+            # Two-phase plan uses sections list; fall back to [chapter] for old plans
+            sections = plan_entry.get("sections") or ([chapter] if chapter else [])
 
-            # Get source text using outline for precise extraction
+            # Get source text using multi-section extraction when available
             section_text = _get_section_text(
                 raw_text=state["raw_text"],
                 page_texts=page_texts,
                 page=page,
                 outline=outline,
                 chapter=chapter,
+                sections=sections or None,
                 section_boundaries=state.get("section_boundaries"),
                 extracted_tables=state.get("extracted_tables"),
                 extracted_equations=state.get("extracted_equations"),
@@ -364,13 +387,16 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             depends_str = ", ".join(plan_entry.get("depends_on", [])[:5])
             used_by_str = ", ".join(plan_entry.get("used_by", [])[:5])
 
+            sections_display = "; ".join(sections) if sections else chapter or "N/A"
+            page_range_display = f"pp. {page}–{page_end}" if page_end != page else f"p. {page}"
+
             base_prompt = (
                 f"Document: {original_name}\n"
                 f"Topic: {plan_entry['title']}\n"
                 f"Folder: {plan_entry.get('folder', '')}\n"
                 f"Scope: {plan_entry.get('scope', 'General coverage')}\n"
-                f"Chapter/Section: {chapter or 'N/A'}\n"
-                f"Page: {page}\n"
+                f"Sections covered: {sections_display}\n"
+                f"Pages: {page_range_display}\n"
                 f"Depends on: {depends_str or 'none'}\n"
                 f"Used by: {used_by_str or 'none'}\n\n"
                 f"Available notes to link to with [[Note Title]]:\n"
@@ -422,6 +448,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                     page=page,
                     outline=outline,
                     chapter=chapter,
+                    sections=sections or None,
                     section_boundaries=state.get("section_boundaries"),
                     extracted_tables=state.get("extracted_tables"),
                     extracted_equations=state.get("extracted_equations"),
@@ -533,13 +560,13 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
         used_by = plan_entry.get("used_by", [])
 
         chapter = plan_entry.get("chapter")
-        page = plan_entry.get("page", 1)
-        if chapter and page:
-            source_location = f"Ch. {chapter}, pp. {page}"
-        elif chapter:
-            source_location = f"Ch. {chapter}"
+        page = plan_entry.get("page_start") or plan_entry.get("page", 1)
+        page_end = plan_entry.get("page_end") or page
+
+        if page_end and page_end != page:
+            source_location = f"pp. {page}–{page_end}"
         elif page:
-            source_location = f"pp. {page}"
+            source_location = f"p. {page}"
         else:
             source_location = ""
         folder = plan_entry.get("folder", "")
@@ -573,7 +600,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             created_at=now,
             source=original_name,
             chapter=chapter,
-            page=page,
+            page=int(page) if page else None,
             summary=note_output.summary,
             space_id=state["space_id"],
         )

@@ -1,6 +1,7 @@
 section_order:
   - role
   - doc_type_strategy
+  - chapter_context
   - textbook_rules
   - paper_rules
   - tutorial_rules
@@ -28,6 +29,36 @@ sections:
 
     required_vars:
       - doc_type
+
+  chapter_context:
+    template: |-
+      You are planning notes for ONE chapter only:
+
+      Chapter: {chapter_title}
+      Folder: {chapter_folder}
+      Subsection strategy: {subsection_strategy}
+      Grouping hint: {grouping_hint}
+
+      Sections available in this chapter:
+      {chapter_sections_json}
+
+      Rules:
+      - Plan notes ONLY for the sections listed above.
+      - Each note entry MUST have a "sections" field: a list of one or more section
+        titles from the list above (exact strings).
+      - Follow the subsection_strategy:
+          "one_for_chapter"      → ONE note entry with sections=[all listed sections]
+          "one_per_subsection"   → one note per listed section
+          "group"                → 2-5 notes grouping related sections per the hint
+      - Do NOT reference sections outside the list above.
+      - The "folder" for every note should be "{chapter_folder}" or a sub-path of it.
+
+    required_vars:
+      - chapter_title
+      - chapter_folder
+      - subsection_strategy
+      - grouping_hint
+      - chapter_sections_json
 
   textbook_rules:
     template: |-
@@ -77,10 +108,9 @@ sections:
       - Assign a "folder" field to each note with its full path
       - Sub-subtopics are encouraged — e.g., "Statistics/Bayesian/MCMC/Hamiltonian Monte Carlo"
 
-      Coverage rule (MANDATORY):
-      - Every level-1 and level-2 section in the document outline MUST have at least one note
-      - Set the "chapter" field to the exact outline section title so coverage can be verified
-      - Do NOT skip sections, even if they seem introductory or transitional
+      Coverage rule:
+      - Every section listed in the chapter_context sections list MUST appear in at least
+        one note's "sections" list.  Python enforces this after your response.
 
   existing_tree:
     template: |-
@@ -128,12 +158,12 @@ sections:
         "notes": [
           {{
             "title": "Note Title",
-            "parent_title": null,
             "folder": "Topic/Subtopic/SubSubtopic",
+            "sections": ["Section A Title", "Section B Title"],
             "tags": ["topic/statistics", "type/concept"],
-            "chapter": "Chapter/Section Name",
-            "page": 1,
-            "level": 1,
+            "page_start": 1,
+            "page_end": 5,
+            "level": 2,
             "scope": "What this note should cover",
             "doc_type": "concept",
             "has_definitions": true,
@@ -144,3 +174,6 @@ sections:
           }}
         ]
       }}
+
+      "sections" MUST be a list of exact section titles from the chapter_context list.
+      "page_start"/"page_end" are your best estimates — Python will recompute exact values.

@@ -23,7 +23,10 @@ class ProcessingState(TypedDict):
     doc_type: str  # textbook | paper | tutorial | reference | article
     # Populated by outline node
     outline: list[dict]  # [{"title", "level", "page_start", "snippet"}]
-    # Populated by plan node
+    # Populated by macro_plan node
+    macro_plan: dict        # {doc_summary, folder_root, high_value_chapters, skip_sections}
+    skipped_sections: list[str]  # titles confirmed as low-value
+    # Populated by chapter_plan node (renamed from plan)
     note_plan: list[dict]
     existing_tags: list[str]
     existing_note_titles: list[str]

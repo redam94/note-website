@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 from .database import async_session
 from .models.document import Document
 from .workflow.checkpoint import clear_checkpoint, load_checkpoint
-from .workflow.graph import NODE_ORDER, processing_pipeline, _nodes
+from .workflow.graph import NODE_ALIASES, NODE_ORDER, _nodes, processing_pipeline
 from .workflow.progress import set_step
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,8 @@ async def run_processing_pipeline(
             "section_boundaries": [],
             "doc_metadata": {},
             "outline": [],
+            "macro_plan": {},
+            "skipped_sections": [],
             "note_plan": [],
             "existing_tags": [],
             "existing_note_titles": [],
@@ -70,8 +72,19 @@ async def run_processing_pipeline(
 
     try:
         if last_node:
+            # Resolve aliases (e.g. old "plan" checkpoint → "chapter_plan")
+            resolved_node = NODE_ALIASES.get(last_node, last_node)
+            if resolved_node not in NODE_ORDER:
+                logger.warning(
+                    "Unknown last_node '%s' (resolved: '%s') — restarting from scratch",
+                    last_node, resolved_node,
+                )
+                last_node = None
+
+        if last_node:
+            resolved_node = NODE_ALIASES.get(last_node, last_node)
             # Resume from checkpoint — run remaining nodes
-            start_idx = NODE_ORDER.index(last_node) + 1
+            start_idx = NODE_ORDER.index(resolved_node) + 1
             remaining = NODE_ORDER[start_idx:]
 
             if remaining:
