@@ -15,11 +15,40 @@ from sqlalchemy import select
 from ...database import async_session
 from ...models.note import Note
 from ...prompts import load_prompt
-from ...services.model_provider import get_provider
+from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
 
 INDEX_SYSTEM = load_prompt("index_gen").format()
+
+
+def _build_concept_map_table(
+    content_children: list,
+    note_plan: list[dict],
+) -> str:
+    """Build a markdown concept-map table from structured data — no LLM needed.
+
+    Columns: Concept | Note | Type | Depends On | Key Result
+    """
+    if not content_children:
+        return ""
+
+    # Build lookup: note title → plan entry (for depends_on / doc_type)
+    plan_by_title: dict[str, dict] = {p["title"]: p for p in note_plan}
+
+    rows = []
+    for child in content_children:
+        plan = plan_by_title.get(child.title, {})
+        doc_type = plan.get("doc_type", "concept")
+        depends_raw = plan.get("depends_on", [])
+        depends_str = ", ".join(f"[[{d}]]" for d in depends_raw[:3]) if depends_raw else "—"
+        summary = (child.summary or "")[:80].replace("|", "\\|")
+        rows.append(
+            f"| [[{child.title}]] | {doc_type} | {depends_str} | {summary} |"
+        )
+
+    header = "| Concept | Type | Depends On | Key Result |\n|---------|------|-----------|------------|\n"
+    return header + "\n".join(rows)
 
 
 async def generate_indices(state: ProcessingState) -> ProcessingState:
@@ -39,6 +68,7 @@ async def generate_indices(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
+        model = await get_setting(db, "model_index")
 
     index_notes = []
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -81,11 +111,17 @@ async def generate_indices(state: ProcessingState) -> ProcessingState:
         children_desc = "\n".join(children_desc_parts)
         leaf_name = folder_path.rsplit("/", 1)[-1] if "/" in folder_path else folder_path
 
+        # Build the concept map in Python — the LLM receives structured input
+        note_plan = state.get("note_plan", [])
+        concept_map = _build_concept_map_table(content_children, note_plan)
+
         prompt = (
             f"Topic folder: {folder_path}\n"
             f"Total items: {len(children)} ({len(child_indexes)} sub-topics, {len(content_children)} notes)\n\n"
-            f"Contents:\n{children_desc}\n\n"
-            "Create an index note for this topic folder. Use [[Note Title]] wiki-link syntax."
+            f"Contents (ALL must appear as [[wiki-links]] in the output):\n{children_desc}\n\n"
+            + (f"Concept map (pre-built, include this table under '## Concept Map'):\n{concept_map}\n\n" if concept_map else "")
+            + "Create an index note for this topic folder. Use [[Note Title]] wiki-link syntax.\n"
+            "Include every item from the Contents list above."
         )
 
         try:
@@ -93,7 +129,7 @@ async def generate_indices(state: ProcessingState) -> ProcessingState:
                 messages=[{"role": "user", "content": prompt}],
                 system=INDEX_SYSTEM,
                 max_tokens=2048,
-                tier="simple",
+                model=model,
             )
             json_match = re.search(r"\{.*\}", response, re.DOTALL)
             if json_match:
@@ -118,6 +154,20 @@ async def generate_indices(state: ProcessingState) -> ProcessingState:
                 ),
             }
 
+        # ── Validate: every child must appear as a [[wiki-link]] ─────────
+        body = index_data.get("content", "")
+        missing_links: list[str] = []
+        for child in children:
+            if f"[[{child.title}]]" not in body:
+                missing_links.append(child.title)
+
+        if missing_links:
+            # Append a mechanical fallout section so nothing is silently dropped
+            missing_section = "\n\n## Additional Notes\n" + "\n".join(
+                f"- [[{t}]]" for t in missing_links
+            )
+            body += missing_section
+
         # Update the index note content
         frontmatter = (
             f"---\n"
@@ -129,7 +179,6 @@ async def generate_indices(state: ProcessingState) -> ProcessingState:
             f"---"
         )
 
-        body = index_data.get("content", "")
         full_content = f"{frontmatter}\n\n# {leaf_name}\n\n{body}"
 
         async with async_session() as db:

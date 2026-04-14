@@ -25,7 +25,7 @@ from ..services.graph_search import (
     get_neighbors,
     grep_notes,
 )
-from ..services.model_provider import get_provider
+from ..services.model_provider import get_provider, get_setting
 
 router = APIRouter(prefix="/api")
 
@@ -43,6 +43,7 @@ async def _retrieve_notes(
     question: str,
     provider,
     status_fn,
+    model: str,
 ) -> tuple[list, list[str]]:
     """Use Haiku + graph search tools to find the most relevant notes.
 
@@ -83,7 +84,7 @@ async def _retrieve_notes(
             }],
             system=RETRIEVAL_SYSTEM,
             max_tokens=1024,
-            tier="simple",
+            model=model,
         )
         json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
         if json_match:
@@ -172,6 +173,7 @@ async def ask_knowledge_base(
         yield f"{_STATUS_PREFIX}Scanning knowledge base...\n"
 
         provider = await get_provider(db)
+        ask_model = await get_setting(db, "model_ask")
 
         async def status_fn(msg: str):
             pass  # Can't yield from nested async — status updates come from yield below
@@ -212,7 +214,7 @@ async def ask_knowledge_base(
                 }],
                 system=RETRIEVAL_SYSTEM,
                 max_tokens=1024,
-                tier="simple",
+                model=model,
             )
             json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
             if json_match:
@@ -308,7 +310,7 @@ async def ask_knowledge_base(
             messages=messages,
             system=QA_SYSTEM,
             max_tokens=8192,
-            tier="advanced",
+            model=ask_model,
         ):
             yield chunk
 

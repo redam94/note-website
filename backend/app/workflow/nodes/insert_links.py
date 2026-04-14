@@ -9,7 +9,7 @@ from sqlalchemy import select
 from ...database import async_session
 from ...models.note import Note
 from ...prompts import load_prompt
-from ...services.model_provider import get_provider
+from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
 
@@ -28,6 +28,7 @@ async def insert_links(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
+        model = await get_setting(db, "model_links")
         result = await db.execute(select(Note.id, Note.title, Note.slug).where(Note.space_id == state["space_id"]))
         all_notes_data = result.all()
 
@@ -62,7 +63,7 @@ async def insert_links(state: ProcessingState) -> ProcessingState:
                     messages=[{"role": "user", "content": prompt}],
                     system=LINK_SYSTEM,
                     max_tokens=8192,
-                    tier="simple",
+                    model=model,
                 )
 
                 if updated_content.strip().startswith("---") or updated_content.strip().startswith("#"):

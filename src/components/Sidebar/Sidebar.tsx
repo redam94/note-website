@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { useSpace } from "@/contexts/SpaceContext";
 import { apiUrl } from "@/lib/api";
@@ -25,11 +25,130 @@ export default function Sidebar() {
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const pathname = usePathname();
   const prevPathRef = useRef(pathname);
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const router = useRouter();
   const { role, logout } = useAuth();
   const { spaceSlug, spaces, setSpace, refreshSpaces } = useSpace();
+  const spaceSlugRef = useRef(spaceSlug);
+  spaceSlugRef.current = spaceSlug;
   const isAdmin = role === "admin";
   const [showNewSpace, setShowNewSpace] = useState(false);
   const [newSpaceName, setNewSpaceName] = useState("");
+
+  // Stable fetchTree — reads spaceSlug/pathname from refs so it never goes stale
+  const fetchTree = useCallback(async () => {
+    try {
+      const res = await fetch(apiUrl("/api/graph", spaceSlugRef.current));
+      if (!res.ok) return;
+      const data = await res.json();
+      const nodes: GraphNode[] = data.nodes;
+      const edges: GraphEdgeData[] = data.edges;
+
+      const nodeMap = new Map<number, TreeNode>();
+      for (const n of nodes) {
+        nodeMap.set(n.id, { ...n, children: [] });
+      }
+
+      const childIds = new Set<number>();
+      for (const e of edges) {
+        if (e.relationship === "part_of") {
+          const parent = nodeMap.get(e.source);
+          const child = nodeMap.get(e.target);
+          if (parent && child && e.source !== e.target) {
+            if (child.id !== parent.id) {
+              if (!parent.children.some((c) => c.id === child.id)) {
+                parent.children.push(child);
+                childIds.add(child.id);
+              }
+            }
+          }
+        }
+      }
+
+      for (const node of nodeMap.values()) {
+        if (node.level === 1) {
+          const lvl2Kids = node.children.filter((c) => c.level === 2);
+          const lvl3Kids = node.children.filter((c) => c.level === 3);
+          if (lvl2Kids.length > 0 && lvl3Kids.length > 0) {
+            for (const l3 of lvl3Kids) {
+              let bestParent = lvl2Kids[lvl2Kids.length - 1];
+              for (const e of edges) {
+                if (e.relationship === "depends_on" && e.source === l3.id) {
+                  const candidate = lvl2Kids.find((k) => k.id === e.target);
+                  if (candidate) { bestParent = candidate; break; }
+                }
+              }
+              if (!bestParent.children.some((c) => c.id === l3.id)) {
+                bestParent.children.push(l3);
+              }
+            }
+            node.children = node.children.filter((c) => c.level !== 3);
+          }
+        }
+      }
+
+      const visited = new Set<number>();
+      function sortChildren(node: TreeNode) {
+        if (visited.has(node.id)) return; // cycle guard
+        visited.add(node.id);
+        node.children.sort((a, b) => {
+          const aIdx = a.title.startsWith("Index:") ? 0 : 1;
+          const bIdx = b.title.startsWith("Index:") ? 0 : 1;
+          if (aIdx !== bIdx) return aIdx - bIdx;
+          return a.title.localeCompare(b.title);
+        });
+        node.children.forEach(sortChildren);
+        visited.delete(node.id);
+      }
+
+      const roots = Array.from(nodeMap.values())
+        .filter((n) => !childIds.has(n.id))
+        .sort((a, b) => a.title.localeCompare(b.title));
+      roots.forEach(sortChildren);
+
+      const parentOf = new Map<number, number>();
+      function mapParents(node: TreeNode) {
+        for (const child of node.children) {
+          parentOf.set(child.id, node.id);
+          mapParents(child);
+        }
+      }
+      roots.forEach(mapParents);
+
+      function getAncestorIds(slug: string): Set<number> {
+        const ids = new Set<number>();
+        for (const n of nodeMap.values()) {
+          if (n.slug === slug) {
+            let cur = n.id;
+            while (parentOf.has(cur)) {
+              cur = parentOf.get(cur)!;
+              ids.add(cur);
+            }
+            break;
+          }
+        }
+        return ids;
+      }
+
+      const currentSlug = pathnameRef.current?.startsWith("/notes/")
+        ? pathnameRef.current.slice(7)
+        : "";
+      const ancestorIds = currentSlug ? getAncestorIds(currentSlug) : new Set<number>();
+
+      setTree(roots);
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        if (prev.size === 0) {
+          for (const r of roots) {
+            if (r.children.length > 0) next.add(r.id);
+          }
+        }
+        for (const id of ancestorIds) next.add(id);
+        return next;
+      });
+    } catch { /* silent */ }
+  }, []); // stable — reads from refs
 
   // When pathname changes, expand ancestors of the active note
   useEffect(() => {
@@ -37,7 +156,7 @@ export default function Sidebar() {
       prevPathRef.current = pathname;
       fetchTree();
     }
-  }, [pathname]);
+  }, [pathname, fetchTree]);
 
   // Expand ancestors of the currently viewed note whenever pathname changes
   useEffect(() => {
@@ -80,144 +199,13 @@ export default function Sidebar() {
     findAndExpand(tree);
   }, [pathname, tree]);
 
-  // Re-fetch tree when space changes
+  // Re-fetch tree when space changes; clear ghost-expanded nodes from previous space
   useEffect(() => {
+    setExpandedIds(new Set());
     fetchTree();
-    const handler = () => fetchTree();
-    window.addEventListener(REFRESH_EVENT, handler);
-    return () => window.removeEventListener(REFRESH_EVENT, handler);
-  }, [spaceSlug]);
-
-  async function fetchTree() {
-    try {
-      const res = await fetch(apiUrl("/api/graph", spaceSlug));
-      if (!res.ok) return;
-      const data = await res.json();
-      const nodes: GraphNode[] = data.nodes;
-      const edges: GraphEdgeData[] = data.edges;
-
-      // Build tree from part_of edges
-      const nodeMap = new Map<number, TreeNode>();
-      for (const n of nodes) {
-        nodeMap.set(n.id, { ...n, children: [] });
-      }
-
-      // Track which nodes are children
-      const childIds = new Set<number>();
-
-      // part_of: source = parent, target = child
-      for (const e of edges) {
-        if (e.relationship === "part_of") {
-          const parent = nodeMap.get(e.source);
-          const child = nodeMap.get(e.target);
-          if (parent && child && e.source !== e.target) {
-            // Only add if child level > parent level (proper nesting)
-            if (child.id !== parent.id) {
-              // Avoid duplicate children
-              if (!parent.children.some((c) => c.id === child.id)) {
-                parent.children.push(child);
-                childIds.add(child.id);
-              }
-            }
-          }
-        }
-      }
-
-      // For nodes at level 3 that ended up as direct children of level 1,
-      // re-parent them under a level 2 sibling if one shares a part_of edge
-      for (const node of nodeMap.values()) {
-        if (node.level === 1) {
-          const lvl2Kids = node.children.filter((c) => c.level === 2);
-          const lvl3Kids = node.children.filter((c) => c.level === 3);
-
-          if (lvl2Kids.length > 0 && lvl3Kids.length > 0) {
-            // Move level 3 kids under the last level 2 sibling
-            // (simple heuristic — better than flat)
-            for (const l3 of lvl3Kids) {
-              // Find best level 2 parent by checking depends_on edges
-              let bestParent = lvl2Kids[lvl2Kids.length - 1];
-              for (const e of edges) {
-                if (e.relationship === "depends_on" && e.source === l3.id) {
-                  const candidate = lvl2Kids.find((k) => k.id === e.target);
-                  if (candidate) { bestParent = candidate; break; }
-                }
-              }
-              if (!bestParent.children.some((c) => c.id === l3.id)) {
-                bestParent.children.push(l3);
-              }
-            }
-            // Remove level 3 from direct children of level 1
-            node.children = node.children.filter((c) => c.level !== 3);
-          }
-        }
-      }
-
-      // Sort children alphabetically, indexes first
-      function sortChildren(node: TreeNode) {
-        node.children.sort((a, b) => {
-          // Indexes first
-          const aIdx = a.title.startsWith("Index:") ? 0 : 1;
-          const bIdx = b.title.startsWith("Index:") ? 0 : 1;
-          if (aIdx !== bIdx) return aIdx - bIdx;
-          return a.title.localeCompare(b.title);
-        });
-        node.children.forEach(sortChildren);
-      }
-
-      // Roots: nodes that aren't children of anyone
-      const roots = Array.from(nodeMap.values())
-        .filter((n) => !childIds.has(n.id))
-        .sort((a, b) => a.title.localeCompare(b.title));
-
-      roots.forEach(sortChildren);
-
-      // Build parent map for ancestor lookups
-      const parentOf = new Map<number, number>();
-      function mapParents(node: TreeNode) {
-        for (const child of node.children) {
-          parentOf.set(child.id, node.id);
-          mapParents(child);
-        }
-      }
-      roots.forEach(mapParents);
-
-      // Find ancestors of the active note (from current pathname)
-      function getAncestorIds(slug: string): Set<number> {
-        const ids = new Set<number>();
-        // Find the node matching the current slug
-        for (const n of nodeMap.values()) {
-          if (n.slug === slug) {
-            let cur = n.id;
-            while (parentOf.has(cur)) {
-              cur = parentOf.get(cur)!;
-              ids.add(cur);
-            }
-            break;
-          }
-        }
-        return ids;
-      }
-
-      const currentSlug = pathname?.startsWith("/notes/") ? pathname.slice(7) : "";
-      const ancestorIds = currentSlug ? getAncestorIds(currentSlug) : new Set<number>();
-
-      setTree(roots);
-      setExpandedIds((prev) => {
-        const next = new Set(prev);
-        // Auto-expand roots with children on first load
-        if (prev.size === 0) {
-          for (const r of roots) {
-            if (r.children.length > 0) next.add(r.id);
-          }
-        }
-        // Always expand ancestors of the active note
-        for (const id of ancestorIds) {
-          next.add(id);
-        }
-        return next;
-      });
-    } catch { /* silent */ }
-  }
+    window.addEventListener(REFRESH_EVENT, fetchTree);
+    return () => window.removeEventListener(REFRESH_EVENT, fetchTree);
+  }, [spaceSlug, fetchTree]);
 
   function toggleExpand(id: number) {
     setExpandedIds((prev) => {
@@ -301,7 +289,7 @@ export default function Sidebar() {
         <div className="flex items-center gap-1">
           <select
             value={spaceSlug}
-            onChange={(e) => setSpace(e.target.value)}
+            onChange={(e) => { setSpace(e.target.value); router.push("/"); }}
             className="flex-1 min-w-0 text-[12px] px-2 py-1 bg-[var(--bg)] border border-[var(--border)] rounded text-[var(--text-secondary)] focus:outline-none focus:border-[var(--accent-light)] transition-colors cursor-pointer"
           >
             {spaces.map((s) => (

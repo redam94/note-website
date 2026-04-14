@@ -15,7 +15,7 @@ from ..models.note import Note
 from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.ask import LinkRequest
-from ..services.model_provider import get_provider
+from ..services.model_provider import get_provider, get_setting
 
 router = APIRouter(prefix="/api")
 
@@ -30,7 +30,7 @@ _LINK_SYSTEM_PROMPT_LEGACY = (
 )
 
 
-async def detect_link(provider, note_a, note_b) -> dict | None:
+async def detect_link(provider, note_a, note_b, model: str) -> dict | None:
     prompt = (
         f'Note A: "{note_a.title}"\n{note_a.content}\n\n'
         f'Note B: "{note_b.title}"\n{note_b.content}'
@@ -40,7 +40,8 @@ async def detect_link(provider, note_a, note_b) -> dict | None:
             messages=[{"role": "user", "content": prompt}],
             system=LINK_SYSTEM_PROMPT,
             max_tokens=512,
-            tier="simple",
+            model=model,
+            json_mode=True,
         )
         result = json.loads(response)
         if result.get("related"):
@@ -65,6 +66,7 @@ async def detect_links(
     other_notes = all_result.scalars().all()
 
     provider = await get_provider(db)
+    model = await get_setting(db, "model_crosslink")
     links = []
     inserted = []
 
@@ -72,7 +74,7 @@ async def detect_links(
     for i in range(0, len(other_notes), 5):
         batch = other_notes[i : i + 5]
         for other in batch:
-            link_result = await detect_link(provider, note, other)
+            link_result = await detect_link(provider, note, other, model)
             if link_result:
                 links.append(
                     {

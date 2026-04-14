@@ -1,6 +1,7 @@
 from langgraph.graph import END, StateGraph
 
 from .checkpoint import with_checkpoint
+from .nodes.classify_document import classify_document
 from .nodes.community_update import update_communities
 from .nodes.create_notes import create_notes
 from .nodes.cross_link import detect_cross_links
@@ -17,6 +18,7 @@ from .state import ProcessingState
 NODE_ORDER = [
     "parse",
     "extract_structure",
+    "classify_document",
     "outline",
     "plan",
     "ensure_tree",
@@ -31,6 +33,7 @@ NODE_ORDER = [
 _nodes = {
     "parse": with_checkpoint("parse")(parse_document),
     "extract_structure": with_checkpoint("extract_structure")(extract_document_structure),
+    "classify_document": with_checkpoint("classify_document")(classify_document),
     "outline": with_checkpoint("outline")(detect_outline),
     "plan": with_checkpoint("plan")(create_plan),
     "ensure_tree": with_checkpoint("ensure_tree")(ensure_tree),
@@ -48,7 +51,8 @@ for name, fn in _nodes.items():
 
 workflow.set_entry_point("parse")
 workflow.add_edge("parse", "extract_structure")
-workflow.add_edge("extract_structure", "outline")
+workflow.add_edge("extract_structure", "classify_document")
+workflow.add_edge("classify_document", "outline")
 workflow.add_edge("outline", "plan")
 workflow.add_edge("plan", "ensure_tree")
 workflow.add_edge("ensure_tree", "create_notes")

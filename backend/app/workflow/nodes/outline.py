@@ -3,7 +3,7 @@ import re
 
 from ...database import async_session
 from ...prompts import load_prompt
-from ...services.model_provider import get_provider
+from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
 
@@ -103,13 +103,14 @@ async def detect_outline(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
+        model = await get_setting(db, "model_outline")
 
     try:
         response = await provider.complete(
             messages=[{"role": "user", "content": prompt}],
             system=_system_prompt.format(),
             max_tokens=4096,
-            tier="simple",
+            model=model,
         )
         json_match = re.search(r"\[.*\]", response, re.DOTALL)
         outline = json.loads(json_match.group()) if json_match else json.loads(response)

@@ -1,20 +1,35 @@
-import fitz  # pymupdf
+import pymupdf4llm
 
 
 def parse_pdf(file_path: str) -> tuple[str, list[dict]]:
     """Parse a PDF file and return (full_text, page_texts).
 
-    page_texts is a list of {"page": int, "text": str} dicts.
+    Uses PyMuPDF4LLM for LLM-optimised output:
+    - Multi-column layout correctly reconstructed
+    - Headings emitted as # / ## / ### Markdown
+    - Tables emitted as Markdown table syntax
+    - Inline and display LaTeX preserved where detected
+    - Headers / footers stripped automatically
+
+    page_texts is a list of {"page": int, "text": str} dicts (1-based page numbers).
     """
-    doc = fitz.open(file_path)
-    page_texts = []
-    full_parts = []
+    chunks: list[dict] = pymupdf4llm.to_markdown(
+        file_path,
+        page_chunks=True,
+        show_progress=False,
+        write_images=False,
+        embed_images=False,
+    )
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        text = page.get_text()
-        page_texts.append({"page": page_num + 1, "text": text})
-        full_parts.append(text)
+    page_texts: list[dict] = []
+    full_parts: list[str] = []
 
-    doc.close()
-    return "\n".join(full_parts), page_texts
+    for chunk in chunks:
+        # page_number is 1-based in the layout backend
+        page_num: int = chunk["metadata"].get("page_number") or (len(page_texts) + 1)
+        text: str = chunk.get("text") or ""
+        if text.strip():
+            page_texts.append({"page": page_num, "text": text})
+            full_parts.append(text)
+
+    return "\n\n".join(full_parts), page_texts

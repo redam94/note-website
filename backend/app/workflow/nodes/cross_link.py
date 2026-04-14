@@ -9,7 +9,7 @@ from ...database import async_session
 from ...models.graph_edge import GraphEdge
 from ...models.note import Note
 from ...prompts import load_prompt
-from ...services.model_provider import get_provider
+from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
 
@@ -31,6 +31,7 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
+        model = await get_setting(db, "model_crosslink")
         result = await db.execute(select(Note).where(Note.space_id == state["space_id"]))
         all_notes = result.scalars().all()
 
@@ -64,7 +65,7 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
                 messages=[{"role": "user", "content": prompt}],
                 system=CANDIDATE_SYSTEM,
                 max_tokens=4096,
-                tier="simple",
+                model=model,
             )
             json_match = re.search(r"\[.*\]", response, re.DOTALL)
             candidate_pairs = json.loads(json_match.group()) if json_match else json.loads(response)
@@ -102,14 +103,17 @@ async def detect_cross_links(state: ProcessingState) -> ProcessingState:
                     messages=[{"role": "user", "content": prompt}],
                     system=CLASSIFY_SYSTEM,
                     max_tokens=256,
-                    tier="simple",
+                    model=model,
                 )
                 result = json.loads(response)
-                if result.get("relationship"):
+                rel = result.get("relationship")
+                # "part_of" belongs in the parent_id hierarchy, not graph_edges;
+                # LLM direction is unreliable and causes tree cycles.
+                if rel and rel != "part_of":
                     return {
                         "source_id": note_a.id,
                         "target_id": note_b.id,
-                        "relationship": result["relationship"],
+                        "relationship": rel,
                         "confidence": result.get("confidence", 0.5),
                     }
             except (json.JSONDecodeError, Exception):

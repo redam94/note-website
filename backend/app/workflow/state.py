@@ -19,6 +19,8 @@ class ProcessingState(TypedDict):
     extracted_definitions: list[dict]  # [{"term", "definition", "type"}]
     section_boundaries: list[dict]    # [{"title", "start_char", "end_char", "page"}]
     doc_metadata: dict                # {"title", "author", "total_pages"}
+    # Populated by classify_document node (pure Python, no LLM)
+    doc_type: str  # textbook | paper | tutorial | reference | article
     # Populated by outline node
     outline: list[dict]  # [{"title", "level", "page_start", "snippet"}]
     # Populated by plan node

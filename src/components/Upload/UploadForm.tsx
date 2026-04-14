@@ -53,6 +53,8 @@ function stageFromStep(step: string | null, status: string): number {
 export default function UploadForm() {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
+  const [uploadFileName, setUploadFileName] = useState<string>("");
   const [docStatus, setDocStatus] = useState<DocStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -60,6 +62,9 @@ export default function UploadForm() {
   const [liveGraph, setLiveGraph] = useState<GraphData | null>(null);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [stubs, setStubs] = useState<{ id: number; title: string; slug: string; reason: string }[]>([]);
+  const [repairState, setRepairState] = useState<"idle" | "repairing" | "done">("idle");
+  const [repairResults, setRepairResults] = useState<{ slug: string; title: string; success: boolean; error?: string }[]>([]);
   const lastStepRef = useRef<string>("");
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -184,9 +189,23 @@ export default function UploadForm() {
           if (pollRef.current) clearInterval(pollRef.current);
           if (timerRef.current) clearInterval(timerRef.current);
           setUploading(false);
+          window.dispatchEvent(new Event("sidebar-refresh"));
+
+          // Fetch stubs — if any exist, pause and let user decide to repair
+          try {
+            const stubRes = await fetch(apiUrl(`/api/documents/${current.id}/stubs`, spaceRef.current));
+            if (stubRes.ok) {
+              const stubList = await stubRes.json();
+              if (stubList.length > 0) {
+                setStubs(stubList);
+                setToast(null);
+                return; // Don't redirect — show stub repair UI
+              }
+            }
+          } catch { /* ignore */ }
+
           setToast(`"${current.originalName}" processed — ${current.notesCount || 0} notes created`);
           setTimeout(() => setToast(null), 5000);
-          window.dispatchEvent(new Event("sidebar-refresh"));
           setTimeout(() => router.push("/"), 2500);
         } else if (current.status === "error") {
           if (pollRef.current) clearInterval(pollRef.current);
@@ -211,13 +230,15 @@ export default function UploadForm() {
       setUploading(true);
       setError(null);
       setDocStatus(null);
-      setActivityLog(["Uploading... 0%"]);
+      setUploadPct(0);
+      setUploadFileName(file.name);
+      setActivityLog([]);
       setLiveGraph(null);
       setStartTime(Date.now());
       lastStepRef.current = "";
 
       try {
-        const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
+        const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB — stays under Next.js 16's 15 MB proxy body limit
         const sessionId = crypto.randomUUID();
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
@@ -238,7 +259,7 @@ export default function UploadForm() {
           if (!chunkRes.ok) throw new Error(await chunkRes.text());
 
           const pct = Math.round(((i + 1) / totalChunks) * 100);
-          setActivityLog([`Uploading... ${pct}%`]);
+          setUploadPct(pct);
         }
 
         const completeForm = new FormData();
@@ -274,6 +295,24 @@ export default function UploadForm() {
     [router]
   );
 
+  async function handleRepairStubs() {
+    if (!docStatus) return;
+    setRepairState("repairing");
+    try {
+      const res = await fetch(apiUrl(`/api/documents/${docStatus.id}/repair-stubs`, spaceSlug), {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const results = await res.json();
+      setRepairResults(results);
+      setRepairState("done");
+      window.dispatchEvent(new Event("sidebar-refresh"));
+    } catch (e) {
+      setRepairState("done");
+      setRepairResults([{ slug: "", title: "Repair request failed", success: false, error: String(e) }]);
+    }
+  }
+
   const currentStageIdx = docStatus
     ? stageFromStep(docStatus.processingStep, docStatus.status)
     : uploading
@@ -292,8 +331,8 @@ export default function UploadForm() {
         Upload Document
       </h1>
 
-      {/* Drop zone — hide when processing */}
-      {!docStatus && (
+      {/* Drop zone — hide while uploading or processing */}
+      {!docStatus && !uploading && (
         <div
           onDrop={(e) => {
             e.preventDefault();
@@ -331,6 +370,30 @@ export default function UploadForm() {
               PDF, DOCX, Markdown, Plain Text
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Chunked upload progress — shown before the document is registered */}
+      {uploading && !docStatus && (
+        <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[15px]">📄</span>
+            <span className="text-[14px] font-medium text-[var(--heading)] truncate flex-1">
+              {uploadFileName}
+            </span>
+            <span className="text-[12px] text-[var(--muted)] tabular-nums flex-shrink-0">
+              {uploadPct}%
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
+              style={{ width: `${uploadPct}%` }}
+            />
+          </div>
+          <p className="text-[12px] text-[var(--muted)]">
+            Uploading{uploadPct < 100 ? "..." : " — finalizing..."}
+          </p>
         </div>
       )}
 
@@ -402,12 +465,80 @@ export default function UploadForm() {
               })}
             </div>
 
-            {docStatus.status === "done" && (
+            {docStatus.status === "done" && stubs.length === 0 && repairState === "idle" && (
               <div className="mt-2 p-3 rounded bg-[var(--accent-bg)] text-[var(--accent)] text-[13px]">
                 Processing complete. Redirecting...
               </div>
             )}
           </div>
+
+          {/* Stub repair panel — shown after pipeline completes with stubs */}
+          {stubs.length > 0 && repairState !== "done" && (
+            <div className="bg-[var(--surface)] border border-amber-400/40 rounded-lg p-4 space-y-3">
+              <div className="flex items-start gap-3">
+                <span className="text-amber-400 text-[18px] flex-shrink-0">⚠</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13px] font-semibold text-[var(--heading)]">
+                    {stubs.length} note{stubs.length !== 1 ? "s" : ""} generated as stubs
+                  </p>
+                  <p className="text-[12px] text-[var(--muted)] mt-0.5">
+                    The AI couldn&apos;t generate full content for these notes. You can repair them now with additional prompts, or skip and fix them later.
+                  </p>
+                </div>
+              </div>
+              <ul className="space-y-1 max-h-[140px] overflow-y-auto">
+                {stubs.map((s) => (
+                  <li key={s.slug} className="flex items-start gap-2 text-[11px]">
+                    <span className="text-amber-400 flex-shrink-0 mt-0.5">•</span>
+                    <span className="font-medium text-[var(--text-secondary)] truncate">{s.title}</span>
+                    <span className="text-[var(--muted)] flex-shrink-0 ml-auto pl-2 truncate max-w-[160px]">{s.reason}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleRepairStubs}
+                  disabled={repairState === "repairing"}
+                  className="flex-1 px-3 py-1.5 text-[12px] font-medium bg-[var(--accent)] text-white rounded hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {repairState === "repairing" ? "Repairing..." : `Repair ${stubs.length} stub${stubs.length !== 1 ? "s" : ""}`}
+                </button>
+                <button
+                  onClick={() => router.push("/")}
+                  disabled={repairState === "repairing"}
+                  className="px-3 py-1.5 text-[12px] text-[var(--muted)] bg-[var(--surface2)] rounded hover:bg-[var(--border)] disabled:opacity-50 transition-colors"
+                >
+                  Skip
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Repair results */}
+          {repairState === "done" && repairResults.length > 0 && (
+            <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg p-4 space-y-3">
+              <p className="text-[13px] font-semibold text-[var(--heading)]">
+                Repair complete — {repairResults.filter((r) => r.success).length}/{repairResults.length} notes repaired
+              </p>
+              <ul className="space-y-1 max-h-[140px] overflow-y-auto">
+                {repairResults.map((r, i) => (
+                  <li key={i} className="flex items-center gap-2 text-[11px]">
+                    <span className={r.success ? "text-[var(--accent)]" : "text-[var(--danger)]"}>
+                      {r.success ? "✓" : "✗"}
+                    </span>
+                    <span className="text-[var(--text-secondary)] truncate flex-1">{r.title}</span>
+                    {r.error && <span className="text-[var(--muted)] truncate max-w-[160px]">{r.error}</span>}
+                  </li>
+                ))}
+              </ul>
+              <button
+                onClick={() => router.push("/")}
+                className="w-full px-3 py-1.5 text-[12px] font-medium bg-[var(--accent)] text-white rounded hover:opacity-90 transition-opacity"
+              >
+                Go to notes
+              </button>
+            </div>
+          )}
 
           {/* Live graph — appears once notes exist */}
           {liveGraph && liveGraph.nodes.length > 0 && (
@@ -491,7 +622,7 @@ export default function UploadForm() {
         <div className="mt-4 p-3 rounded bg-[var(--danger)]/5 border border-[var(--danger)]/20 text-[13px]">
           <p className="text-[var(--danger)]">{error}</p>
           <button
-            onClick={() => { setError(null); setDocStatus(null); setUploading(false); setActivityLog([]); setLiveGraph(null); setStartTime(null); }}
+            onClick={() => { setError(null); setDocStatus(null); setUploading(false); setUploadPct(0); setUploadFileName(""); setActivityLog([]); setLiveGraph(null); setStartTime(null); }}
             className="mt-2 px-3 py-1 text-[12px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
           >
             Try again

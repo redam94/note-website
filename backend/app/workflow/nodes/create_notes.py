@@ -12,18 +12,60 @@ from sqlalchemy import select
 from ...database import async_session
 from ...models.note import Note
 from ...prompts import load_prompt
-from ...services.model_provider import get_provider
+from ...schemas.note_output import NoteOutput
+from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
 
 NOTE_SYSTEM = load_prompt("create_note").format()
-QUALITY_SYSTEM = load_prompt("quality_check").format()
 
 _CONCURRENCY = 6
 _MIN_QUALITY_CHARS = 500  # minimum body length to accept without escalation
-_QUALITY_THRESHOLD = 0.5
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_callout_block_ids(text: str) -> str:
+    """Append ^block-ids to [!definition] and [!theorem] callouts that lack one.
+
+    A callout is a run of lines starting with '>'.  We detect the callout type
+    from the opening line and append a slug id if the last line of the callout
+    doesn't already start with '> ^'.
+    """
+    _CALLOUT_OPEN = re.compile(r"^>\s*\[!(definition|theorem|lemma|corollary|proposition)\]\s*(.*)", re.IGNORECASE)
+    _BLOCK_ID = re.compile(r"^>\s*\^")
+
+    lines = text.split("\n")
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _CALLOUT_OPEN.match(lines[i])
+        if m:
+            callout_type = m.group(1).lower()
+            callout_name = m.group(2).strip()
+            # Collect the entire callout block
+            block_start = i
+            block: list[str] = [lines[i]]
+            i += 1
+            while i < len(lines) and lines[i].startswith(">"):
+                block.append(lines[i])
+                i += 1
+            # Check if last content line already has a block id
+            last_content = next(
+                (l for l in reversed(block) if l.strip() not in (">", "> ")),
+                "",
+            )
+            if not _BLOCK_ID.match(last_content):
+                # Generate a slug from type + name
+                raw = f"{callout_type}-{callout_name}" if callout_name else callout_type
+                # Simple slug: lowercase, replace spaces/special chars with -
+                slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:40]
+                block.append(f"> ^{slug}")
+            result.extend(block)
+        else:
+            result.append(lines[i])
+            i += 1
+    return "\n".join(result)
 
 
 def _normalize_content(text: str) -> str:
@@ -50,6 +92,46 @@ def _normalize_content(text: str) -> str:
         else:
             result.append(line)
     return "\n".join(result)
+
+
+# ── Folder → parent_id resolution ───────────────────────────────────
+
+
+def _resolve_parent_id(folder: str, folder_id_map: dict[str, int]) -> int | None:
+    """Return the index-note id for a given folder path.
+
+    Tries in order:
+    1. Exact match (after stripping whitespace)
+    2. Case-insensitive exact match
+    3. Best prefix match — longest folder path that is a prefix of `folder`
+       (handles cases where the LLM used a more-specific path than what was
+       created, or a deeper path that wasn't broken into intermediate nodes)
+    4. None — note becomes a top-level root
+    """
+    if not folder or not folder_id_map:
+        return None
+
+    # 1. Exact
+    if folder in folder_id_map:
+        return folder_id_map[folder]
+
+    # 2. Case-insensitive
+    folder_lower = folder.lower()
+    for path, note_id in folder_id_map.items():
+        if path.lower() == folder_lower:
+            return note_id
+
+    # 3. Best prefix — most specific folder that is an ancestor of `folder`
+    best_path = ""
+    best_id: int | None = None
+    for path, note_id in folder_id_map.items():
+        # A path is a valid prefix if folder starts with it followed by /
+        if folder_lower.startswith(path.lower() + "/") or folder_lower.startswith(path.lower()):
+            if len(path) > len(best_path):
+                best_path = path
+                best_id = note_id
+
+    return best_id
 
 
 # ── Source text extraction (boundary-aware) ───────────────────────────
@@ -179,9 +261,14 @@ def _build_frontmatter(
     depends_on: list[str],
     used_by: list[str],
     doc_type: str = "concept",
+    aliases: list[str] | None = None,
 ) -> str:
     lines = ["---"]
     lines.append(f'title: "{title}"')
+    if aliases:
+        lines.append("aliases:")
+        for alias in aliases:
+            lines.append(f'  - "{alias}"')
     lines.append("tags:")
     lines.append("  - source/ingested")
     for tag in tags:
@@ -211,33 +298,20 @@ def _build_frontmatter(
 # ── Quality check ────────────────────────────────────────────────────
 
 
-def _is_stub(note_data: dict) -> bool:
-    """Check if the generated note is too shallow to accept."""
-    content = note_data.get("content", "")
+def _stub_reason(note: NoteOutput) -> str | None:
+    """Return why this note is a stub, or None if it passes quality."""
+    content = note.assemble_markdown()
     if len(content) < _MIN_QUALITY_CHARS:
-        return True
+        return f"total content too short ({len(content)}/{_MIN_QUALITY_CHARS} chars)"
+    if len(note.main_content) < 200:
+        return f"main_content too short ({len(note.main_content)}/200 chars)"
     if "Content extracted from" in content and content.count("##") <= 2:
-        return True
-    # Check it has at least Overview + one more section
-    headings = re.findall(r"^##\s+", content, re.MULTILINE)
-    if len(headings) < 2:
-        return True
-    return False
-
-
-def _parse_llm_response(response: str) -> dict | None:
-    """Try to parse the LLM response as JSON with summary+content."""
-    try:
-        json_match = re.search(r"\{.*\}", response, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
-        else:
-            data = json.loads(response)
-        if "content" in data:
-            return data
-    except (json.JSONDecodeError, ValueError):
-        pass
+        return "boilerplate extraction placeholder"
     return None
+
+
+def _is_stub(note: NoteOutput) -> bool:
+    return _stub_reason(note) is not None
 
 
 # ── Main node ─────────────────────────────────────────────────────────
@@ -253,6 +327,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
 
     async with async_session() as db:
         provider = await get_provider(db)
+        model = await get_setting(db, "model_create")
         result = await db.execute(select(Note.slug))
         existing_slugs = set(result.scalars().all())
 
@@ -266,7 +341,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
     sem = asyncio.Semaphore(_CONCURRENCY)
     completed = 0
 
-    async def _generate_one(idx: int, plan_entry: dict) -> tuple[int, dict, dict]:
+    async def _generate_one(idx: int, plan_entry: dict) -> tuple[int, dict, NoteOutput, bool]:
         nonlocal completed
         async with sem:
             page = plan_entry.get("page", 1)
@@ -300,31 +375,47 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                 f"Used by: {used_by_str or 'none'}\n\n"
                 f"Available notes to link to with [[Note Title]]:\n"
                 + "\n".join(f"- {t}" for t in linkable[:40])
-                + f"\n\nSource text from document:\n{section_text}\n\n"
-                "Create a detailed, substantive note. Use [!definition], [!theorem], "
-                "[!example] callouts with ^block-ids. Include LaTeX math. "
-                "Cross-link to existing notes with [[wiki-links]]. "
-                "Display math must have $$ on its own line."
+                + f"\n\nSource text:\n{section_text}"
             )
 
-            # ── Phase 1: Try Haiku first ─────────────────────────────
-            note_data = None
+            title = plan_entry["title"]
+            logger.info(
+                "[%d/%d] Generating '%s' | model=%s page=%s chapter=%s src=%d chars",
+                idx + 1, total_planned, title, model, page, chapter or "-", len(section_text),
+            )
+
+            # ── Phase 1: Generate note ────────────────────────────────
+            note_output: NoteOutput | None = None
+            is_fallback = False
             try:
-                response = await provider.complete(
+                note_output = await provider.complete_structured(
+                    NoteOutput,
                     messages=[{"role": "user", "content": base_prompt}],
                     system=NOTE_SYSTEM,
-                    max_tokens=4096,
-                    tier="simple",
+                    max_tokens=8192,
+                    model=model,
                 )
-                note_data = _parse_llm_response(response)
+                assembled = note_output.assemble_markdown()
+                reason = _stub_reason(note_output)
+                if reason:
+                    logger.warning(
+                        "  Phase 1 STUB '%s': %s | main=%d chars overview=%d chars",
+                        title, reason, len(note_output.main_content), len(note_output.overview),
+                    )
+                else:
+                    logger.info(
+                        "  Phase 1 OK '%s': %d chars | main=%d overview=%d see_also=%d",
+                        title, len(assembled), len(note_output.main_content),
+                        len(note_output.overview), len(note_output.see_also),
+                    )
             except Exception as e:
-                logger.debug("Haiku failed for %s: %s", plan_entry["title"], e)
+                logger.warning("  Phase 1 FAILED '%s': %s", title, e)
 
-            # ── Phase 2: Escalate to Sonnet if Haiku produced a stub ──
-            if note_data is None or _is_stub(note_data):
-                haiku_draft = note_data.get("content", "") if note_data else ""
+            # ── Phase 2: Retry with expanded context if still a stub ──
+            if note_output is None or _is_stub(note_output):
+                prior_draft = note_output.assemble_markdown() if note_output else ""
+                prior_reason = _stub_reason(note_output) if note_output else "generation failed"
 
-                # Get more source text for the retry
                 expanded_text = _get_section_text(
                     raw_text=state["raw_text"],
                     page_texts=page_texts,
@@ -336,96 +427,62 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                     extracted_equations=state.get("extracted_equations"),
                     max_chars=15_000,
                 )
+                logger.info(
+                    "  Phase 2 retry '%s' (was: %s) | expanded src=%d chars",
+                    title, prior_reason, len(expanded_text),
+                )
 
                 escalation_prompt = base_prompt.replace(section_text, expanded_text)
-                if haiku_draft:
+                if prior_draft:
                     escalation_prompt += (
                         f"\n\nA previous attempt produced this insufficient draft "
                         f"(too brief or missing sections). Rewrite with much more detail, "
-                        f"specific formulas, examples, and explanations:\n\n{haiku_draft[:2000]}"
+                        f"specific formulas, examples, and explanations:\n\n{prior_draft[:2000]}"
                     )
 
                 try:
-                    response = await provider.complete(
+                    retry_output = await provider.complete_structured(
+                        NoteOutput,
                         messages=[{"role": "user", "content": escalation_prompt}],
                         system=NOTE_SYSTEM,
-                        max_tokens=4096,
-                        tier="advanced",
+                        max_tokens=8192,
+                        model=model,
                     )
-                    sonnet_data = _parse_llm_response(response)
-                    if sonnet_data and not _is_stub(sonnet_data):
-                        note_data = sonnet_data
+                    retry_reason = _stub_reason(retry_output)
+                    if retry_reason:
+                        logger.warning("  Phase 2 still STUB '%s': %s", title, retry_reason)
+                    else:
+                        assembled = retry_output.assemble_markdown()
+                        logger.info(
+                            "  Phase 2 OK '%s': %d chars | main=%d overview=%d",
+                            title, len(assembled), len(retry_output.main_content), len(retry_output.overview),
+                        )
+                        note_output = retry_output
                 except Exception as e:
-                    logger.debug("Sonnet escalation failed for %s: %s", plan_entry["title"], e)
+                    logger.warning("  Phase 2 FAILED '%s': %s", title, e)
 
             # ── Fallback: embed real source text ──────────────────────
-            if note_data is None or _is_stub(note_data):
+            if note_output is None or _is_stub(note_output):
+                final_reason = _stub_reason(note_output) if note_output else "all phases failed"
+                logger.warning(
+                    "  FALLBACK '%s': creating stub with raw source text (%s)",
+                    title, final_reason,
+                )
+                is_fallback = True
                 source_excerpt = section_text[:4000].strip()
-                note_data = {
-                    "summary": f"Key concepts from {plan_entry['title']} in {original_name}.",
-                    "content": (
-                        f"> [!summary]\n"
-                        f"> Key concepts from {plan_entry['title']} in {original_name}.\n\n"
-                        f"## Overview\n\n"
-                        f"This note covers {plan_entry.get('scope', plan_entry['title'])} "
+                note_output = NoteOutput(
+                    summary=f"Key concepts from {title} in {original_name}.",
+                    overview=(
+                        f"This note covers {plan_entry.get('scope', title)} "
                         f"from {original_name}"
                         f"{f', Chapter: {chapter}' if chapter else ''}"
-                        f"{f', p. {page}' if page else ''}.\n\n"
-                        f"## Source Material\n\n"
-                        f"{source_excerpt}\n\n"
-                        f"## See Also\n\n"
-                        + "\n".join(f"- [[{t}]]" for t in linkable[:8])
+                        f"{f', p. {page}' if page else ''}."
                     ),
-                    "_is_fallback": True,
-                }
-
-            # ── Quality gate: Haiku checks if note is good enough ────
-            content_preview = note_data.get("content", "")[:2000]
-            try:
-                qc_response = await provider.complete(
-                    messages=[{"role": "user", "content": f"Note title: {plan_entry['title']}\n\n{content_preview}"}],
-                    system=QUALITY_SYSTEM,
-                    max_tokens=256,
-                    tier="simple",
+                    main_content=f"## Source Material\n\n{source_excerpt}",
+                    examples="See source document for worked examples.",
+                    connections="Related to other topics covered in this document.",
+                    see_also=linkable[:8],
                 )
-                qc_match = re.search(r"\{.*\}", qc_response, re.DOTALL)
-                qc = json.loads(qc_match.group()) if qc_match else json.loads(qc_response)
-                score = qc.get("score", 1.0)
-                passed = qc.get("pass", True) and score >= _QUALITY_THRESHOLD
-
-                if not passed and not note_data.get("_is_fallback"):
-                    # Failed quality check — retry with Sonnet using feedback
-                    suggestion = qc.get("suggestion", "Add more depth and structure")
-                    issues = qc.get("issues", [])
-                    logger.info("Quality check failed for %s (%.2f): %s", plan_entry["title"], score, issues)
-
-                    retry_prompt = (
-                        f"{base_prompt}\n\n"
-                        f"IMPORTANT — A quality review found these problems with a previous draft:\n"
-                        f"Issues: {', '.join(issues)}\n"
-                        f"Suggestion: {suggestion}\n\n"
-                        f"Write a substantially better version. Do NOT just describe what the note should cover — "
-                        f"actually explain the concepts with depth, definitions, examples, and formulas."
-                    )
-
-                    try:
-                        retry_response = await provider.complete(
-                            messages=[{"role": "user", "content": retry_prompt}],
-                            system=NOTE_SYSTEM,
-                            max_tokens=4096,
-                            tier="advanced",
-                        )
-                        retry_data = _parse_llm_response(retry_response)
-                        if retry_data and not _is_stub(retry_data):
-                            note_data = retry_data
-                    except Exception as e:
-                        logger.debug("Quality retry failed for %s: %s", plan_entry["title"], e)
-
-            except Exception as e:
-                logger.debug("Quality check failed for %s: %s", plan_entry["title"], e)
-
-            # Remove internal flag
-            note_data.pop("_is_fallback", None)
 
             completed += 1
             await set_step(
@@ -433,7 +490,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                 f"Creating notes... ({completed}/{total_planned} complete)",
                 notes_count=completed,
             )
-            return (idx, plan_entry, note_data)
+            return (idx, plan_entry, note_output, is_fallback)
 
     results = await asyncio.gather(
         *[_generate_one(i, entry) for i, entry in enumerate(note_plan)],
@@ -445,13 +502,15 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
     created_notes = []
 
     ordered = sorted(
-        [(idx, entry, data) for idx, entry, data in results if not isinstance(data, BaseException)],
+        [r for r in results if not isinstance(r, BaseException)],
         key=lambda x: x[0],
     )
 
     now = datetime.now(timezone.utc).isoformat()
 
-    for idx, plan_entry, note_data in ordered:
+    stub_count = sum(1 for r in ordered if r[3])
+
+    for idx, plan_entry, note_output, note_is_fallback in ordered:
         base_slug = slugify(plan_entry["title"], lowercase=True)
         slug = base_slug
         counter = 1
@@ -461,13 +520,9 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
         existing_slugs.add(slug)
 
         # Primary: use folder path to assign parent to the tree index note
-        folder = plan_entry.get("folder", "")
+        folder = (plan_entry.get("folder") or "").strip()
         folder_id_map = state.get("folder_id_map", {})
-        parent_id = folder_id_map.get(folder)
-        parent_title = plan_entry.get("parent_title")
-        # Fallback: use parent_title within current document
-        if parent_id is None:
-            parent_id = slug_map.get(parent_title) if parent_title else None
+        parent_id = _resolve_parent_id(folder, folder_id_map)
 
         tags = plan_entry.get("tags", [])
         if isinstance(tags, str):
@@ -475,13 +530,18 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
 
         doc_type = plan_entry.get("doc_type", "concept")
         depends_on = plan_entry.get("depends_on", [])
-        if parent_title:
-            depends_on = [parent_title] + [d for d in depends_on if d != parent_title]
         used_by = plan_entry.get("used_by", [])
 
         chapter = plan_entry.get("chapter")
         page = plan_entry.get("page", 1)
-        source_location = f"pp. {page}" if page else ""
+        if chapter and page:
+            source_location = f"Ch. {chapter}, pp. {page}"
+        elif chapter:
+            source_location = f"Ch. {chapter}"
+        elif page:
+            source_location = f"pp. {page}"
+        else:
+            source_location = ""
         folder = plan_entry.get("folder", "")
 
         frontmatter = _build_frontmatter(
@@ -494,9 +554,12 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             depends_on=depends_on,
             used_by=used_by,
             doc_type=doc_type,
+            aliases=note_output.aliases or [],
         )
 
-        body = _normalize_content(note_data.get("content", ""))
+        assembled = note_output.assemble_markdown()
+        assembled = _ensure_callout_block_ids(assembled)
+        body = _normalize_content(assembled)
         full_content = f"{frontmatter}\n\n# {plan_entry['title']}\n\n{body}"
 
         note = Note(
@@ -511,7 +574,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             source=original_name,
             chapter=chapter,
             page=page,
-            summary=note_data.get("summary"),
+            summary=note_output.summary,
             space_id=state["space_id"],
         )
 
@@ -529,7 +592,12 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                 "level": note.level,
                 "parent_id": note.parent_id,
                 "tags": tags,
+                "is_stub": note_is_fallback,
             }
         )
 
-    return {**state, "created_notes": created_notes}
+    logger.info(
+        "create_notes complete: %d notes created, %d stubs",
+        len(created_notes), stub_count,
+    )
+    return {**state, "created_notes": created_notes, "stub_count": stub_count}

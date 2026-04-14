@@ -26,7 +26,7 @@ from ..models.note import Note
 from ..models.space import Space
 from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
-from ..services.model_provider import get_provider
+from ..services.model_provider import get_provider, get_setting
 
 router = APIRouter(prefix="/api/maintenance", dependencies=[Depends(require_admin)])
 
@@ -213,6 +213,7 @@ async def repair_note(
         neighbor_context = "\n".join(neighbor_summaries[:10])
 
     provider = await get_provider(db)
+    model = await get_setting(db, "model_create")
     titles_text = "\n".join(f"- {t}" for t in all_titles[:60])
 
     # ── Phase 1: Sonnet diagnoses and plans the repair ────────────
@@ -227,7 +228,7 @@ async def repair_note(
             messages=[{"role": "user", "content": plan_prompt}],
             system=_plan_prompt.format(),
             max_tokens=2048,
-            tier="advanced",
+            model=model,
         )
         json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
         repair_plan = json.loads(json_match.group()) if json_match else json.loads(plan_response)
@@ -258,7 +259,7 @@ async def repair_note(
             messages=[{"role": "user", "content": execute_prompt}],
             system=_execute_prompt.format(),
             max_tokens=8192,
-            tier="simple",
+            model=model,
         )
 
         # Validate response looks like a note
@@ -381,6 +382,7 @@ async def _run_reindex(job_id: str, space_id: int):
 
         async with async_session() as db:
             provider = await get_provider(db)
+            index_model = await get_setting(db, "model_index")
             slugs_result = await db.execute(select(Note.slug))
             existing_slugs = set(slugs_result.scalars().all())
             existing_indexes: dict[str, Note] = {}
@@ -430,7 +432,7 @@ async def _run_reindex(job_id: str, space_id: int):
                     messages=[{"role": "user", "content": f"Folder: {folder_path}\nNotes ({len(notes)}):\n{children_desc}"}],
                     system=index_system,
                     max_tokens=2048,
-                    tier="simple",
+                    model=index_model,
                 )
                 json_match = re.search(r"\{.*\}", response, re.DOTALL)
                 index_data = json.loads(json_match.group()) if json_match else json.loads(response)
@@ -605,7 +607,7 @@ async def _run_reindex(job_id: str, space_id: int):
                     messages=[{"role": "user", "content": f"Root of knowledge base\nTop-level items ({len(all_root_items)}):\n{children_desc}"}],
                     system=index_system,
                     max_tokens=2048,
-                    tier="simple",
+                    model=index_model,
                 )
                 json_match = re.search(r"\{.*\}", response, re.DOTALL)
                 root_data = json.loads(json_match.group()) if json_match else json.loads(response)

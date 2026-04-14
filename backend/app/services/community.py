@@ -21,7 +21,7 @@ from ..models.subgraph_edge import SubgraphEdge
 from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
 from ..services.graph_builder import build_full_graph
-from ..services.model_provider import ModelProvider, get_provider
+from ..services.model_provider import ModelProvider, get_provider, get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ def detect_hierarchy(G) -> list[dict[int, int]]:
 async def generate_topic_label(
     provider: ModelProvider,
     member_notes: list[Note],
+    model: str,
 ) -> tuple[str, str]:
     """Generate a short topic label and summary for a cluster."""
     note_lines = []
@@ -110,7 +111,7 @@ async def generate_topic_label(
             messages=[{"role": "user", "content": prompt}],
             system=LABEL_SYSTEM,
             max_tokens=256,
-            tier="simple",
+            model=model,
         )
         json_match = re.search(r"\{.*\}", response, re.DOTALL)
         data = json.loads(json_match.group()) if json_match else json.loads(response)
@@ -222,6 +223,7 @@ async def run_community_detection(db: AsyncSession, space_id: int = 1) -> list[d
         return []
 
     provider = await get_provider(db)
+    community_model = await get_setting(db, "model_community")
     now = datetime.now(timezone.utc).isoformat()
 
     # Clear existing subgraph data for this space
@@ -236,7 +238,7 @@ async def run_community_detection(db: AsyncSession, space_id: int = 1) -> list[d
     async def _label_cluster(cluster: dict) -> dict:
         async with sem:
             member_notes = [note_map[mid] for mid in cluster["member_ids"] if mid in note_map]
-            label, summary = await generate_topic_label(provider, member_notes)
+            label, summary = await generate_topic_label(provider, member_notes, community_model)
             return {**cluster, "label": label, "summary": summary}
 
     results = await asyncio.gather(
@@ -411,6 +413,7 @@ async def incremental_update(
     if absorbed:
         affected_cluster_ids = {a["cluster_id"] for a in absorbed}
         provider = await get_provider(db)
+        community_model = await get_setting(db, "model_community")
 
         for cid in affected_cluster_ids:
             member_ids = cluster_members[cid]
@@ -418,7 +421,7 @@ async def incremental_update(
                 select(Note).where(Note.id.in_(member_ids))
             )
             member_notes = notes_result.scalars().all()
-            label, summary = await generate_topic_label(provider, list(member_notes))
+            label, summary = await generate_topic_label(provider, list(member_notes), community_model)
 
             await db.execute(
                 update(SubgraphNode)

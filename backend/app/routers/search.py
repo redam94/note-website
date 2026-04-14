@@ -16,7 +16,7 @@ from ..models.subgraph_node import SubgraphNode
 from ..prompts import load_prompt
 from ..schemas.search import SearchResult, SmartSearchResponse, SmartSearchResult
 from ..services.graph_search import _parse_tags
-from ..services.model_provider import get_provider
+from ..services.model_provider import get_provider, get_setting
 
 router = APIRouter(prefix="/api")
 
@@ -308,13 +308,14 @@ async def smart_search(
     )
 
     provider = await get_provider(db)
+    model = await get_setting(db, "model_ask")
 
     try:
         response = await provider.complete(
             messages=[{"role": "user", "content": prompt}],
             system=SMART_SEARCH_SYSTEM,
             max_tokens=2048,
-            tier="simple",
+            model=model,
         )
 
         json_match = re.search(r"\{.*\}", response, re.DOTALL)

@@ -8,40 +8,50 @@ sections:
   role:
     template: >-
       You are a knowledge base organizer creating an index note
-      in Obsidian format.
+      in Obsidian format. Index notes are navigation hubs — their
+      primary job is to make every child note and sub-folder instantly
+      discoverable.
 
   structure_rules:
     template: |-
-      The index note MUST follow this structure:
+      The index note MUST follow this exact structure:
 
       > [!abstract] Routing Summary
-      > Brief description of what this section covers and how many notes it contains.
-      > - For [topic A] -> [[Note A]]
-      > - For [topic B] -> [[Note B]]
+      > Brief description of what this folder covers and how many items it contains.
+      > - Need [concept X]? → [[Note A]]
+      > - Need [concept Y]? → [[Note B]]
+      > (one routing line per child — include ALL children, no exceptions)
 
-      ## Sub-topics / Notes
-      - [[Note Title 1]] — COVERS: brief description of what this note covers
-      - [[Note Title 2]] — COVERS: brief description of what this note covers
+      ## Sub-topics
+      (Include this section only if sub-topic index notes exist as children)
+      - [[Index: Path/To/Subtopic]] — CONTAINS: brief description of what that sub-folder covers
 
-      ## Key Concept Dependencies
-      (A simple ASCII diagram or bullet list showing how concepts relate)
+      ## Concept Map
+      (If a pre-built table is provided in the prompt, insert it here verbatim.
+      Otherwise build a table with columns: Concept | Type | Depends On | Key Result)
 
-      ## Source
-      - [[raw/filename.pdf]] — Full citation
+      ## Notes
+      - [[Note Title 1]] — COVERS: one-line description of exactly what this note covers
+      - [[Note Title 2]] — COVERS: one-line description of exactly what this note covers
+      (Every content note child MUST appear here — no exceptions)
+
+      ## Sources
+      - Source document reference goes here
 
   linking_rules:
     template: |-
-      Linking rules:
+      Linking rules (MANDATORY — violations will be corrected automatically):
 
-      - Use `[[Note Title]]` wiki-link syntax for all note references
-      - The routing summary should help a reader quickly find the right note
-      - Each note entry needs a one-line "COVERS:" description
-      - Keep it concise but informative
+      - Every child note and sub-folder provided in the prompt MUST appear as a [[wiki-link]]
+      - Use the exact title provided — do not paraphrase or shorten note titles
+      - Sub-topic indexes describe what topics the sub-folder CONTAINS, not just its name
+      - Content note entries must each have a "COVERS:" description (one line)
+      - The routing summary must have one line per child so readers can navigate without opening each note
 
   output_schema:
     template: |-
       Return ONLY valid JSON:
       {{
-        "summary": "Brief description for the routing summary",
+        "summary": "Brief description for the routing summary callout",
         "content": "Full markdown content after the H1 title"
       }}

@@ -82,7 +82,11 @@ async def build_full_graph(db: AsyncSession, space_id: int | None = None) -> Ful
             _directed_refs[(source, target)] += 1
 
     # 1. DB edges (from cross_link detection)
+    # Skip "part_of" from graph_edges — hierarchy is authoritative via parent_id column;
+    # LLM-generated part_of edges are often reversed and create cycles in the tree.
     for edge in all_edges:
+        if edge.relationship_type == "part_of":
+            continue
         add_edge(edge.source_id, edge.target_id, edge.relationship_type, edge.confidence)
 
     # 2. Parent-child edges

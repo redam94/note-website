@@ -22,7 +22,7 @@ from ..models.note_comment import NoteComment
 from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.note import LinkInfo, NoteWithLinks
-from ..services.model_provider import get_provider
+from ..services.model_provider import get_provider, get_setting
 
 router = APIRouter(prefix="/api")
 
@@ -234,6 +234,7 @@ async def reprocess_note(
         )
 
     provider = await get_provider(db)
+    model = await get_setting(db, "model_create")
 
     _plan_prompt = load_prompt("repair_plan")
     _execute_prompt = load_prompt("repair_execute")
@@ -255,7 +256,7 @@ async def reprocess_note(
             messages=[{"role": "user", "content": plan_prompt}],
             system=_plan_prompt.format(),
             max_tokens=2048,
-            tier="advanced",
+            model=model,
         )
         json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
         if json_match:
@@ -289,7 +290,7 @@ async def reprocess_note(
             messages=[{"role": "user", "content": execute_prompt}],
             system=_execute_prompt.format(),
             max_tokens=8192,
-            tier="advanced",
+            model=model,
         )
 
         stripped = new_content.strip()

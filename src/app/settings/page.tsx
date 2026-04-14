@@ -3,32 +3,59 @@
 import { useEffect, useState } from "react";
 
 interface SettingsData {
-  simple_model: string;
-  advanced_model: string;
   anthropic_api_key: string;
+  openai_api_key: string;
+  google_api_key: string;
   lmstudio_base_url: string;
+  model_outline: string;
+  model_plan: string;
+  model_create: string;
+  model_links: string;
+  model_crosslink: string;
+  model_index: string;
+  model_community: string;
+  model_ask: string;
 }
 
 interface ModelsData {
   anthropic: string[];
+  openai: string[];
+  google: string[];
   lmstudio: string[];
 }
 
+const TASK_MODELS: { key: keyof SettingsData; label: string }[] = [
+  { key: "model_outline",   label: "Outline detection" },
+  { key: "model_plan",      label: "Planning" },
+  { key: "model_create",    label: "Note creation" },
+  { key: "model_links",     label: "Link insertion" },
+  { key: "model_crosslink", label: "Cross-linking" },
+  { key: "model_index",     label: "Index generation" },
+  { key: "model_community", label: "Community detection" },
+  { key: "model_ask",       label: "Q&A" },
+];
+
+const EMPTY_SETTINGS: SettingsData = {
+  anthropic_api_key: "",
+  openai_api_key: "",
+  google_api_key: "",
+  lmstudio_base_url: "",
+  model_outline: "",
+  model_plan: "",
+  model_create: "",
+  model_links: "",
+  model_crosslink: "",
+  model_index: "",
+  model_community: "",
+  model_ask: "",
+};
+
 export default function SettingsPage() {
-  const [settings, setSettings] = useState<SettingsData>({
-    simple_model: "",
-    advanced_model: "",
-    anthropic_api_key: "",
-    lmstudio_base_url: "",
-  });
-  const [models, setModels] = useState<ModelsData>({ anthropic: [], lmstudio: [] });
+  const [settings, setSettings] = useState<SettingsData>(EMPTY_SETTINGS);
+  const [models, setModels] = useState<ModelsData>({ anthropic: [], openai: [], google: [], lmstudio: [] });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    provider: string;
-    success: boolean;
-    message: string;
-  } | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
 
   useEffect(() => {
     Promise.all([
@@ -56,13 +83,14 @@ export default function SettingsPage() {
   };
 
   const handleTest = async (provider: string) => {
-    setTestResult(null);
+    setTestResults((prev) => ({ ...prev, [provider]: { success: false, message: "Testing..." } }));
     const res = await fetch("/api/settings/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
     });
-    setTestResult({ provider, ...(await res.json()) });
+    const data = await res.json();
+    setTestResults((prev) => ({ ...prev, [provider]: data }));
   };
 
   if (loading) return <div className="p-8 text-[var(--muted)]">Loading settings...</div>;
@@ -75,57 +103,69 @@ export default function SettingsPage() {
   const btnSecondary =
     "px-3 py-1.5 text-[13px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded border border-[var(--border)] hover:bg-[var(--border)] transition-colors";
 
+  function ModelSelect({ field }: { field: keyof SettingsData }) {
+    return (
+      <select
+        value={settings[field]}
+        onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
+        className={selectClass}
+      >
+        {models.anthropic.length > 0 && (
+          <optgroup label="Anthropic">
+            {models.anthropic.map((m) => <option key={m} value={m}>{m}</option>)}
+          </optgroup>
+        )}
+        {models.openai.length > 0 && (
+          <optgroup label="OpenAI">
+            {models.openai.map((m) => <option key={m} value={m}>{m}</option>)}
+          </optgroup>
+        )}
+        {models.google.length > 0 && (
+          <optgroup label="Google">
+            {models.google.map((m) => <option key={m} value={m}>{m}</option>)}
+          </optgroup>
+        )}
+        {models.lmstudio.length > 0 && (
+          <optgroup label="Custom / Local">
+            {models.lmstudio.map((m) => <option key={m} value={m}>{m}</option>)}
+          </optgroup>
+        )}
+      </select>
+    );
+  }
+
+  function TestStatus({ provider }: { provider: string }) {
+    const result = testResults[provider];
+    if (!result) return null;
+    return (
+      <p className={`text-[13px] ${result.success ? "text-[var(--callout-green)]" : "text-[var(--danger)]"}`}>
+        {result.message}
+      </p>
+    );
+  }
+
   return (
     <div className="max-w-[620px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <h1 className="text-[24px] font-bold text-[var(--heading)] mb-6">Settings</h1>
 
       <div className="space-y-5">
+
+        {/* Task Models */}
         <section className={sectionClass}>
-          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">
-            Model Configuration
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label className={labelClass}>Simple Model</label>
-              <select
-                value={settings.simple_model}
-                onChange={(e) => setSettings({ ...settings, simple_model: e.target.value })}
-                className={selectClass}
-              >
-                <optgroup label="Anthropic">
-                  {models.anthropic.map((m) => <option key={m} value={m}>{m}</option>)}
-                </optgroup>
-                {models.lmstudio.length > 0 && (
-                  <optgroup label="LMStudio">
-                    {models.lmstudio.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </optgroup>
-                )}
-              </select>
-            </div>
-            <div>
-              <label className={labelClass}>Advanced Model</label>
-              <select
-                value={settings.advanced_model}
-                onChange={(e) => setSettings({ ...settings, advanced_model: e.target.value })}
-                className={selectClass}
-              >
-                <optgroup label="Anthropic">
-                  {models.anthropic.map((m) => <option key={m} value={m}>{m}</option>)}
-                </optgroup>
-                {models.lmstudio.length > 0 && (
-                  <optgroup label="LMStudio">
-                    {models.lmstudio.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </optgroup>
-                )}
-              </select>
-            </div>
+          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">Task Models</h2>
+          <div className="space-y-3">
+            {TASK_MODELS.map(({ key, label }) => (
+              <div key={key}>
+                <label className={labelClass}>{label}</label>
+                <ModelSelect field={key} />
+              </div>
+            ))}
           </div>
         </section>
 
+        {/* Anthropic */}
         <section className={sectionClass}>
-          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">
-            Anthropic API
-          </h2>
+          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">Anthropic</h2>
           <div className="space-y-3">
             <div>
               <label className={labelClass}>API Key</label>
@@ -137,21 +177,52 @@ export default function SettingsPage() {
                 className={inputClass}
               />
             </div>
-            <button onClick={() => handleTest("anthropic")} className={btnSecondary}>
-              Test Connection
-            </button>
-            {testResult?.provider === "anthropic" && (
-              <p className={`text-[13px] ${testResult.success ? "text-[var(--callout-green)]" : "text-[var(--danger)]"}`}>
-                {testResult.message}
-              </p>
-            )}
+            <button onClick={() => handleTest("anthropic")} className={btnSecondary}>Test Connection</button>
+            <TestStatus provider="anthropic" />
           </div>
         </section>
 
+        {/* OpenAI */}
         <section className={sectionClass}>
-          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">
-            LMStudio
-          </h2>
+          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">OpenAI</h2>
+          <div className="space-y-3">
+            <div>
+              <label className={labelClass}>API Key</label>
+              <input
+                type="password"
+                value={settings.openai_api_key}
+                onChange={(e) => setSettings({ ...settings, openai_api_key: e.target.value })}
+                placeholder="sk-..."
+                className={inputClass}
+              />
+            </div>
+            <button onClick={() => handleTest("openai")} className={btnSecondary}>Test Connection</button>
+            <TestStatus provider="openai" />
+          </div>
+        </section>
+
+        {/* Google */}
+        <section className={sectionClass}>
+          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">Google AI</h2>
+          <div className="space-y-3">
+            <div>
+              <label className={labelClass}>API Key</label>
+              <input
+                type="password"
+                value={settings.google_api_key}
+                onChange={(e) => setSettings({ ...settings, google_api_key: e.target.value })}
+                placeholder="AIza..."
+                className={inputClass}
+              />
+            </div>
+            <button onClick={() => handleTest("google")} className={btnSecondary}>Test Connection</button>
+            <TestStatus provider="google" />
+          </div>
+        </section>
+
+        {/* Custom / Local */}
+        <section className={sectionClass}>
+          <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-4">Custom / Local</h2>
           <div className="space-y-3">
             <div>
               <label className={labelClass}>Base URL</label>
@@ -163,14 +234,8 @@ export default function SettingsPage() {
                 className={inputClass}
               />
             </div>
-            <button onClick={() => handleTest("lmstudio")} className={btnSecondary}>
-              Test Connection
-            </button>
-            {testResult?.provider === "lmstudio" && (
-              <p className={`text-[13px] ${testResult.success ? "text-[var(--callout-green)]" : "text-[var(--danger)]"}`}>
-                {testResult.message}
-              </p>
-            )}
+            <button onClick={() => handleTest("lmstudio")} className={btnSecondary}>Test Connection</button>
+            <TestStatus provider="lmstudio" />
           </div>
         </section>
 
@@ -181,6 +246,7 @@ export default function SettingsPage() {
         >
           {saving ? "Saving..." : "Save Settings"}
         </button>
+
       </div>
     </div>
   );

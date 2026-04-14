@@ -7,7 +7,6 @@ from PDFs (pymupdf), DOCX (python-docx), and Markdown files.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from pathlib import Path
 
 
@@ -49,102 +48,67 @@ def extract_structure(file_path: str, mime_type: str, raw_text: str) -> dict:
 
 
 def _extract_pdf(file_path: str, raw_text: str) -> dict:
+    """Extract PDF structure metadata.
+
+    raw_text is already rich Markdown produced by PyMuPDF4LLM, so:
+    - Headings are present as # / ## / ### syntax → use _extract_markdown
+    - Tables are already Markdown tables in raw_text → no find_tables() needed
+    - We only open the PDF (with fitz) for the two things 4LLM doesn't give us:
+        1. The built-in PDF outline (TOC)
+        2. Document metadata (title, author, page count)
+    """
     import fitz
 
     doc = fitz.open(file_path)
-    result = {
-        "toc": [],
-        "headings": [],
-        "tables": [],
-        "equations": [],
-        "definitions": [],
-        "section_boundaries": [],
-        "metadata": {
-            "title": doc.metadata.get("title", "") or "",
-            "author": doc.metadata.get("author", "") or "",
-            "total_pages": len(doc),
-        },
-    }
+    try:
+        result = {
+            "toc": [],
+            "headings": [],
+            "tables": [],
+            "equations": [],
+            "definitions": [],
+            "section_boundaries": [],
+            "metadata": {
+                "title": doc.metadata.get("title", "") or "",
+                "author": doc.metadata.get("author", "") or "",
+                "total_pages": len(doc),
+            },
+        }
 
-    # 1. Extract TOC (built-in, free, 100% accurate)
-    toc = doc.get_toc()
-    for level, title, page_num in toc:
-        result["toc"].append({"title": title.strip(), "level": level, "page": page_num})
+        # 1. Built-in TOC — nearly free (reads only the PDF's outline tree)
+        toc = doc.get_toc()
+        for level, title, page_num in toc:
+            result["toc"].append({"title": title.strip(), "level": level, "page": page_num})
 
-    # 2. Font-based heading detection
-    font_sizes: list[tuple[float, str, int]] = []  # (size, text, page)
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        try:
-            blocks = page.get_text("dict")["blocks"]
-        except Exception:
-            continue
-        for block in blocks:
-            if block.get("type") != 0:  # text blocks only
-                continue
-            for line in block.get("lines", []):
-                line_text_parts = []
-                max_size = 0
-                for span in line.get("spans", []):
-                    line_text_parts.append(span.get("text", ""))
-                    size = span.get("size", 0)
-                    if size > max_size:
-                        max_size = size
-                line_text = " ".join(line_text_parts).strip()
-                if line_text and max_size > 0 and len(line_text) < 200:
-                    font_sizes.append((max_size, line_text, page_num + 1))
+    finally:
+        doc.close()
 
-    # Cluster font sizes to find heading levels
-    if font_sizes:
-        size_counts = Counter(round(s, 1) for s, _, _ in font_sizes)
-        # Body text is the most common size
-        body_size = size_counts.most_common(1)[0][0] if size_counts else 12
-        # Headings are lines significantly larger than body
-        heading_threshold = body_size * 1.15
+    # 2. Headings from Markdown headings in raw_text
+    #    PyMuPDF4LLM already detected headings and emitted them as # / ## / ###,
+    #    so _extract_markdown gives us accurate heading data at zero extra cost.
+    md_result = _extract_markdown(raw_text)
+    result["headings"] = md_result["headings"]
 
-        seen_titles = set()
-        for size, text, page in font_sizes:
-            if size >= heading_threshold and text not in seen_titles:
-                # Determine level by size relative to body
-                if size >= body_size * 1.6:
-                    level = 1
-                elif size >= body_size * 1.3:
-                    level = 2
-                else:
-                    level = 3
-                result["headings"].append({
-                    "title": text, "level": level, "page": page, "font_size": round(size, 1),
-                })
-                seen_titles.add(text)
+    # 3. If the built-in TOC is richer (has page numbers), prefer it and enrich
+    #    the markdown headings with accurate page numbers from the TOC.
+    if len(result["toc"]) >= 3:
+        if not result["headings"]:
+            result["headings"] = [
+                {"title": t["title"], "level": t["level"], "page": t["page"], "font_size": 0}
+                for t in result["toc"]
+            ]
+        else:
+            # Annotate markdown headings with TOC page numbers where we get a match
+            toc_by_title = {t["title"].lower(): t for t in result["toc"]}
+            for h in result["headings"]:
+                match = toc_by_title.get(h["title"].lower())
+                if match:
+                    h["page"] = match["page"]
 
-    # If we got a TOC but no font headings, use TOC as headings
-    if result["toc"] and not result["headings"]:
-        result["headings"] = [
-            {"title": t["title"], "level": t["level"], "page": t["page"], "font_size": 0}
-            for t in result["toc"]
-        ]
+    # 4. Tables: PyMuPDF4LLM already put them in raw_text as Markdown table syntax.
+    #    The pipeline uses the raw_text tables for note content; we don't need to
+    #    re-extract them here.  result["tables"] stays [] — that's intentional.
 
-    # 3. Table extraction
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        try:
-            tables = page.find_tables()
-            for table in tables:
-                rows = table.extract()
-                if rows and len(rows) > 1:
-                    # Try to find a caption (text just above the table)
-                    caption = ""
-                    result["tables"].append({
-                        "page": page_num + 1,
-                        "rows": rows[:20],  # limit rows
-                        "caption": caption,
-                        "row_count": len(rows),
-                        "col_count": len(rows[0]) if rows else 0,
-                    })
-        except Exception:
-            continue
-
-    doc.close()
     return result
 
 

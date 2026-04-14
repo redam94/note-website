@@ -14,6 +14,7 @@ const nextConfig: NextConfig = {
   },
   experimental: {
     proxyTimeout: 300_000,
+    proxyClientMaxBodySize: 15 * 1024 * 1024, // 15 MB — allows 10 MB chunks + multipart overhead
   },
 };
 

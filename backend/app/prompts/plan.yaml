@@ -1,5 +1,9 @@
 section_order:
   - role
+  - doc_type_strategy
+  - textbook_rules
+  - paper_rules
+  - tutorial_rules
   - hierarchy_rules
   - existing_tree
   - tag_rules
@@ -15,6 +19,52 @@ sections:
       folder hierarchy (e.g., Statistics/Advanced Models/SMM) with index files
       at each level.
 
+  doc_type_strategy:
+    template: |-
+      Document type: {doc_type}
+
+      The document type determines the extraction strategy. Follow the rules for
+      this type precisely — they override general defaults.
+
+    required_vars:
+      - doc_type
+
+  textbook_rules:
+    template: |-
+      Textbook extraction strategy:
+
+      - Create ONE note per major concept, theorem, or technique — NOT one note per chapter
+      - A single chapter typically produces 3-8 notes, depending on concept density
+      - Every theorem, definition, and worked example gets its own formal treatment
+      - Plan notes that will use [!definition], [!theorem], and [!example] callouts with block IDs
+      - Mark has_definitions/has_theorems/has_math accurately — these drive note generation depth
+      - Follow the book's own structure (Parts → Chapters → Sections) for the folder hierarchy
+      - A "<Book Title> - Overview" note should be planned at the top folder level
+
+  paper_rules:
+    template: |-
+      Paper extraction strategy:
+
+      - Preserve the paper's argument structure: motivation → model → results → discussion
+      - Plan these note types in order:
+          1. "<Paper> - Overview" — research question, contribution, key finding
+          2. Motivation/Setup — problem statement, why existing approaches fall short
+          3. Model/Methods — full formal specification, all assumptions
+          4. Main Results — one note per major result, full formal statement
+          5. Empirical Application (if applicable) — data, estimation, interpretation
+          6. Discussion — limitations, extensions, connections
+      - Preserve the paper's notation; define every symbol explicitly
+
+  tutorial_rules:
+    template: |-
+      Tutorial extraction strategy:
+
+      - Preserve the step-by-step structure completely
+      - Code blocks must remain complete — plan notes that include full runnable snippets
+      - Plan separate concept notes for the underlying theory
+      - Link steps to concept notes via depends_on (the tutorial step depends on the concept)
+      - Tag tutorial notes with type/tutorial, concept notes with type/concept
+
   hierarchy_rules:
     template: |-
       Folder hierarchy rules:
@@ -26,6 +76,11 @@ sections:
       - The folder path should reflect the conceptual hierarchy, not the document structure
       - Assign a "folder" field to each note with its full path
       - Sub-subtopics are encouraged — e.g., "Statistics/Bayesian/MCMC/Hamiltonian Monte Carlo"
+
+      Coverage rule (MANDATORY):
+      - Every level-1 and level-2 section in the document outline MUST have at least one note
+      - Set the "chapter" field to the exact outline section title so coverage can be verified
+      - Do NOT skip sections, even if they seem introductory or transitional
 
   existing_tree:
     template: |-
