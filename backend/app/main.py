@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from .config import settings
 from .database import engine
-from .routers import ask, auth, community, documents, graph, graph_tools, link, maintenance, notes, search, settings as settings_router, spaces
+from .routers import ask, auth, chat, community, documents, graph, graph_tools, link, maintenance, notes, search, settings as settings_router, spaces
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ app.include_router(notes.router)
 app.include_router(search.router)
 app.include_router(graph.router)
 app.include_router(ask.router)
+app.include_router(chat.router)
 app.include_router(link.router)
 app.include_router(settings_router.router)
 app.include_router(graph_tools.router)

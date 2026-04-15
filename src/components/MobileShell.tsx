@@ -33,7 +33,7 @@ export default function MobileShell({ sidebar, children }: MobileShellProps) {
             onClick={() => setSidebarOpen(false)}
           />
           {/* Drawer */}
-          <div className="relative z-50 h-full w-72 max-w-[85vw]">
+          <div className="relative z-50 h-full w-[300px] max-w-[85vw]">
             {sidebar}
           </div>
         </div>

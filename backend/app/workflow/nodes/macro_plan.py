@@ -83,6 +83,9 @@ def _build_fallback_macro(
 
     Every non-skipped level-1 section becomes a high-value chapter with
     subsection_strategy='one_per_subsection'.
+
+    folder_root is left as doc_name here; the chapter plan prompt will
+    still guide the LLM to use topic-based sub-paths for individual notes.
     """
     high_value = []
     for section in outline:
@@ -96,7 +99,8 @@ def _build_fallback_macro(
             "subsection_strategy": "one_per_subsection",
             "grouping_hint": "",
             "estimated_notes": 3,
-            "folder": f"{doc_name}/{title}",
+            # Use the section title as the topic anchor; LLM will refine per note
+            "folder": title,
         })
 
     return {

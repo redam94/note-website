@@ -4,6 +4,7 @@ import "./globals.css";
 import Sidebar from "@/components/Sidebar/Sidebar";
 import AuthProvider from "@/components/AuthProvider";
 import { SpaceProvider } from "@/contexts/SpaceContext";
+import { ChatProvider } from "@/contexts/ChatContext";
 import MobileShell from "@/components/MobileShell";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -29,9 +30,11 @@ export default function RootLayout({
       <body className={inter.className}>
         <AuthProvider>
           <SpaceProvider>
-            <MobileShell sidebar={<Sidebar />}>
-              {children}
-            </MobileShell>
+            <ChatProvider>
+              <MobileShell sidebar={<Sidebar />}>
+                {children}
+              </MobileShell>
+            </ChatProvider>
           </SpaceProvider>
         </AuthProvider>
       </body>

@@ -271,10 +271,15 @@ def _build_tree_text(index_notes: list) -> str:
 # ── Fallback plan helpers (kept for backward compat / escalation) ─────
 
 
-def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
-    """Build a minimal note plan from the outline when LLM response is unusable."""
+def _build_fallback_plan(outline: list[dict], folder_root: str) -> list[dict]:
+    """Build a minimal note plan from the outline when LLM response is unusable.
+
+    folder_root should be the topic domain (from macro_plan["folder_root"]) —
+    NOT the document name.  Level-1 sections produce notes under folder_root;
+    level-2+ sections produce notes under folder_root/L1-title.
+    """
     plan = []
-    current_l1_title = doc_name
+    current_l1_title = ""
 
     for section in outline:
         level = section.get("level", 1)
@@ -284,9 +289,9 @@ def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
 
         if level == 1:
             current_l1_title = title
-            folder = doc_name
+            folder = folder_root
         else:
-            folder = f"{doc_name}/{current_l1_title}"
+            folder = f"{folder_root}/{current_l1_title}" if current_l1_title else folder_root
 
         plan.append({
             "title": title,
@@ -309,8 +314,11 @@ def _build_fallback_plan(outline: list[dict], doc_name: str) -> list[dict]:
     return plan
 
 
-def _backfill_folders(note_plan: list[dict], doc_name: str) -> None:
-    """Fill empty `folder` fields in-place using surrounding context."""
+def _backfill_folders(note_plan: list[dict], folder_root: str) -> None:
+    """Fill empty `folder` fields in-place using surrounding context.
+
+    folder_root should be the topic domain, not the document name.
+    """
     level_folder: dict[int, str] = {}
     for entry in note_plan:
         folder = (entry.get("folder") or "").strip()
@@ -330,10 +338,8 @@ def _backfill_folders(note_plan: list[dict], doc_name: str) -> None:
                 or running.get(level - 1)
                 or level_folder.get(level)
                 or level_folder.get(level - 1)
+                or folder_root
             )
-            if not inferred:
-                chapter = (entry.get("chapter") or entry.get("title") or "").strip()
-                inferred = f"{doc_name}/{chapter}" if chapter else doc_name
             entry["folder"] = inferred
             running[level] = inferred
 
@@ -354,11 +360,13 @@ async def create_chapter_plans(state: ProcessingState) -> ProcessingState:
 
     high_value_chapters: list[dict] = macro_plan.get("high_value_chapters", [])
 
+    folder_root = macro_plan.get("folder_root") or original_name
+
     # If macro plan produced no chapters, use full outline as fallback
     if not high_value_chapters:
         logger.warning("No high_value_chapters in macro_plan — falling back to full outline")
-        note_plan = _build_fallback_plan(outline, original_name)
-        _backfill_folders(note_plan, original_name)
+        note_plan = _build_fallback_plan(outline, folder_root)
+        _backfill_folders(note_plan, folder_root)
         return {**state, "note_plan": note_plan, "existing_tags": [], "existing_note_titles": []}
 
     # Fetch DB data
@@ -431,10 +439,10 @@ async def create_chapter_plans(state: ProcessingState) -> ProcessingState:
     # If all chapters failed, fall back to full outline
     if not note_plan:
         logger.warning("All chapter plans failed — falling back to full outline plan")
-        note_plan = _build_fallback_plan(outline, original_name)
+        note_plan = _build_fallback_plan(outline, folder_root)
 
     # ── Folder backfill ───────────────────────────────────────────────
-    _backfill_folders(note_plan, macro_plan.get("folder_root", original_name))
+    _backfill_folders(note_plan, folder_root)
 
     # ── Bidirectional dependency enforcement ──────────────────────────
     title_to_plan: dict[str, dict] = {p["title"]: p for p in note_plan}

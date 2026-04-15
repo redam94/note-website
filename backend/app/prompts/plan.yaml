@@ -35,7 +35,7 @@ sections:
       You are planning notes for ONE chapter only:
 
       Chapter: {chapter_title}
-      Folder: {chapter_folder}
+      Topic area (folder anchor): {chapter_folder}
       Subsection strategy: {subsection_strategy}
       Grouping hint: {grouping_hint}
 
@@ -51,7 +51,11 @@ sections:
           "one_per_subsection"   → one note per listed section
           "group"                → 2-5 notes grouping related sections per the hint
       - Do NOT reference sections outside the list above.
-      - The "folder" for every note should be "{chapter_folder}" or a sub-path of it.
+      - The "folder" for each note MUST be a topic-based path, e.g.
+        "Linear Algebra/Eigenvalues" or "Probability/Bayesian Inference/Conjugate Priors".
+        Use "{chapter_folder}" as a starting point but refine it to match the note's
+        SPECIFIC CONCEPT — not the chapter title or section number.
+        NEVER use chapter numbers, section numbers, or the document name as folder components.
 
     required_vars:
       - chapter_title
@@ -98,15 +102,16 @@ sections:
 
   hierarchy_rules:
     template: |-
-      Folder hierarchy rules:
+      Folder hierarchy rules — TOPIC-BASED ONLY:
 
-      - Organize notes into a topic-based folder path, e.g., "Bayesian Statistics/Inference Fundamentals/MCMC Methods"
-      - Folder depth is UNLIMITED — use as many levels as the conceptual hierarchy requires
-      - Level 1 = broad domain, Level 2 = subtopic, Level 3+ = increasingly specific sub-subtopics
-      - Each note covers ONE topic and should be self-contained
-      - The folder path should reflect the conceptual hierarchy, not the document structure
-      - Assign a "folder" field to each note with its full path
-      - Sub-subtopics are encouraged — e.g., "Statistics/Bayesian/MCMC/Hamiltonian Monte Carlo"
+      - Folders represent CONCEPTS, not document structure
+      - e.g., "Probability/Bayesian Inference/Conjugate Priors" NOT "Chapter 4/Section 4.2"
+      - Level 1 = broad domain ("Statistics", "Thermodynamics", "Machine Learning")
+      - Level 2 = major subdomain ("Bayesian Statistics", "Information Theory")
+      - Level 3+ = increasingly specific topics ("MCMC Methods", "Hamiltonian Monte Carlo")
+      - The folder path MUST reflect conceptual hierarchy, NEVER document structure
+      - NEVER include chapter numbers, section numbers, or document/book titles in folder paths
+      - Multiple notes from different chapters can share the same folder if conceptually related
 
       Coverage rule:
       - Every section listed in the chapter_context sections list MUST appear in at least

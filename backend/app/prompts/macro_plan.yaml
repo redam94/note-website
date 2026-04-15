@@ -82,14 +82,20 @@ sections:
 
   folder_rules:
     template: |-
-      Folder assignment:
+      Folder assignment — TOPIC-BASED, NOT DOCUMENT-BASED:
 
-      - folder_root is the top-level folder name for ALL notes from this document
-        (e.g., "Linear Algebra" for a linear algebra textbook).
-      - Each high_value_chapters entry gets a "folder" field: the full path where
-        notes for that chapter live (e.g., "Linear Algebra/Vector Spaces").
-      - Use the document's own hierarchy as the folder structure.
-      - Reuse sensible academic naming (prefer "Probability Theory" over "Chapter 3").
+      folder_root is the SUBJECT DOMAIN of the document, not its title or filename.
+      Examples: "Linear Algebra", "Macroeconomics", "Machine Learning", "Thermodynamics".
+      Never use the document name, author name, or edition as folder_root.
+
+      Each high_value_chapters entry gets a "folder" field representing WHERE in the
+      knowledge base the chapter's notes conceptually belong:
+      - Paths follow domain/subdomain/topic structure, e.g. "Linear Algebra/Vector Spaces"
+      - Use the SUBJECT MATTER of the chapter, not its title or section number
+      - If chapter 3 is titled "3. Matrix Factorizations", folder = "Linear Algebra/Matrix Factorizations"
+      - NEVER use "Chapter 3", "Section 2.1", or the document name as folder components
+      - Multiple chapters may share the same folder if they cover the same topic area
+      - Prefer standard academic terminology over the author's idiosyncratic chapter names
 
   output_schema:
     template: |-

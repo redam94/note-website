@@ -69,6 +69,10 @@ export default function ForceGraph({
 }: ForceGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredNode, setHoveredNode] = useState<number | null>(null);
+  // Persist node positions and zoom between data updates so existing nodes
+  // don't bounce when new nodes are added.
+  const nodePositionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const zoomTransformRef = useRef<d3.ZoomTransform | null>(null);
 
   useEffect(() => {
     if (!svgRef.current || !data.nodes.length) return;
@@ -92,7 +96,38 @@ export default function ForceGraph({
       );
     }
 
-    const nodes: SimNode[] = filteredNodes.map((n) => ({ ...n }));
+    // Build a neighbor map so new nodes can be seeded near a connected node
+    const edgeNeighbors = new Map<number, number[]>();
+    filteredEdges.forEach((e) => {
+      if (!edgeNeighbors.has(e.source)) edgeNeighbors.set(e.source, []);
+      if (!edgeNeighbors.has(e.target)) edgeNeighbors.set(e.target, []);
+      edgeNeighbors.get(e.source)!.push(e.target);
+      edgeNeighbors.get(e.target)!.push(e.source);
+    });
+
+    const posCache = nodePositionsRef.current;
+    const nodes: SimNode[] = filteredNodes.map((n) => {
+      const cached = posCache.get(n.id);
+      if (cached) {
+        // Existing node — restore last known position so it doesn't move
+        return { ...n, x: cached.x, y: cached.y };
+      }
+      // New node — try to seed near a connected neighbor that has a position
+      const neighbors = edgeNeighbors.get(n.id) ?? [];
+      for (const nbId of neighbors) {
+        const nbPos = posCache.get(nbId);
+        if (nbPos) {
+          const angle = Math.random() * 2 * Math.PI;
+          const r = 40 + Math.random() * 30;
+          return { ...n, x: nbPos.x + Math.cos(angle) * r, y: nbPos.y + Math.sin(angle) * r };
+        }
+      }
+      // No neighbor found — seed near center with small random jitter
+      const angle = Math.random() * 2 * Math.PI;
+      const r = Math.random() * 80;
+      return { ...n, x: width / 2 + Math.cos(angle) * r, y: height / 2 + Math.sin(angle) * r };
+    });
+
     const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
     const links: SimLink[] = filteredEdges
@@ -109,11 +144,24 @@ export default function ForceGraph({
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
-      .on("zoom", (event) => g.attr("transform", event.transform));
+      .on("zoom", (event) => {
+        zoomTransformRef.current = event.transform;
+        g.attr("transform", event.transform);
+      });
     svg.call(zoom);
+    // Restore previous zoom/pan so the view doesn't jump on data updates
+    if (zoomTransformRef.current) {
+      svg.call(zoom.transform, zoomTransformRef.current);
+    }
+
+    // Use a lower starting alpha when most nodes are already positioned —
+    // this keeps existing nodes nearly still while new ones settle in.
+    const hasNewNodes = filteredNodes.some((n) => !posCache.has(n.id));
+    const startAlpha = hasNewNodes && posCache.size > 0 ? 0.25 : 1;
 
     const simulation = d3
       .forceSimulation(nodes)
+      .alpha(startAlpha)
       .force("link", d3.forceLink(links).id((d: any) => d.id).distance(60).strength(0.15))
       .force("charge", d3.forceManyBody().strength(-40).distanceMax(300))
       .force("center", d3.forceCenter(width / 2, height / 2).strength(0.03))
@@ -216,6 +264,12 @@ export default function ForceGraph({
       .attr("class", "select-none pointer-events-none");
 
     simulation.on("tick", () => {
+      // Persist every node's position so the next render can restore them
+      nodes.forEach((n) => {
+        if (n.x != null && n.y != null) {
+          nodePositionsRef.current.set(n.id, { x: n.x, y: n.y });
+        }
+      });
       link
         .attr("x1", (d) => (d.source as SimNode).x!)
         .attr("y1", (d) => (d.source as SimNode).y!)

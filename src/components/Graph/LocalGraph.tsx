@@ -28,9 +28,18 @@ export default function LocalGraph({
   const svgRef = useRef<SVGSVGElement>(null);
   const router = useRouter();
   const [modalOpen, setModalOpen] = useState(false);
+  const nodePositionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  // Reset position cache when the focus note changes
+  const prevFocusRef = useRef<number>(focusNodeId);
 
   useEffect(() => {
     if (!svgRef.current || !data.nodes.length) return;
+
+    // Clear cache when navigating to a different note
+    if (prevFocusRef.current !== focusNodeId) {
+      nodePositionsRef.current.clear();
+      prevFocusRef.current = focusNodeId;
+    }
 
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
@@ -47,7 +56,15 @@ export default function LocalGraph({
       (e) => neighborIds.has(e.source) && neighborIds.has(e.target)
     );
 
-    const nodes: SimNode[] = filteredNodes.map((n) => ({ ...n }));
+    const posCache = nodePositionsRef.current;
+    const nodes: SimNode[] = filteredNodes.map((n) => {
+      const cached = posCache.get(n.id);
+      if (cached) return { ...n, x: cached.x, y: cached.y };
+      // Seed focus node at center; others nearby
+      if (n.id === focusNodeId) return { ...n, x: width / 2, y: height / 2 };
+      const angle = Math.random() * 2 * Math.PI;
+      return { ...n, x: width / 2 + Math.cos(angle) * 40, y: height / 2 + Math.sin(angle) * 40 };
+    });
     const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
     const links: SimLink[] = filteredEdges
@@ -112,7 +129,15 @@ export default function LocalGraph({
 
     const linkEl = g.selectAll("line");
 
+    const hasNewNodes = filteredNodes.some((n) => !posCache.has(n.id));
+    if (hasNewNodes && posCache.size > 0) simulation.alpha(0.25);
+
     simulation.on("tick", () => {
+      nodes.forEach((n) => {
+        if (n.x != null && n.y != null) {
+          nodePositionsRef.current.set(n.id, { x: n.x, y: n.y });
+        }
+      });
       linkEl
         .attr("x1", (d: any) => d.source.x)
         .attr("y1", (d: any) => d.source.y)

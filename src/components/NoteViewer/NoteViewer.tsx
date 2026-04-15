@@ -225,7 +225,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   return (
     <div className="flex min-h-screen">
       {/* ── Center ── */}
-      <div className="flex-1 max-w-[740px] mx-auto px-4 py-4 md:px-8 md:py-6">
+      <div className="flex-1 max-w-[780px] mx-auto px-4 py-4 md:px-6 md:py-6">
         {/* Breadcrumb */}
         <nav className="flex items-center gap-1.5 text-[12px] text-[var(--muted)] mb-4 flex-wrap">
           {breadcrumbs.map((bc, idx) => (
@@ -456,7 +456,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
       </div>
 
       {/* ── Right sidebar ── */}
-      <div className="w-[260px] flex-shrink-0 border-l border-[var(--border)] hidden lg:block">
+      <div className="w-[300px] flex-shrink-0 border-l border-[var(--border)] hidden lg:block">
         <div className="sticky top-0 h-screen overflow-y-auto p-4 space-y-6">
           {/* Graph */}
           <div>
@@ -464,7 +464,7 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
               Graph View
             </h3>
             {graphData.nodes.length > 0 && (
-              <LocalGraph data={graphData} focusNodeId={note.id} width={232} height={170} />
+              <LocalGraph data={graphData} focusNodeId={note.id} width={268} height={190} />
             )}
           </div>
 
