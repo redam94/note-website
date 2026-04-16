@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 
@@ -53,11 +54,13 @@ class ModelProvider:
         openai_api_key: str,
         google_api_key: str,
         lmstudio_base_url: str,
+        timeout: float = 120.0,
     ):
         self.anthropic_api_key = anthropic_api_key
         self.openai_api_key = openai_api_key
         self.google_api_key = google_api_key
         self.lmstudio_base_url = lmstudio_base_url
+        self.timeout = timeout
 
     # ── Provider detection ────────────────────────────────────────────
 
@@ -94,8 +97,10 @@ class ModelProvider:
         json_mode: bool = False,
     ) -> str:
         if self._is_anthropic(model):
-            return await self._anthropic_complete(model, messages, system, max_tokens)
-        return await self._openai_complete(model, messages, system, max_tokens, json_mode=json_mode)
+            coro = self._anthropic_complete(model, messages, system, max_tokens)
+        else:
+            coro = self._openai_complete(model, messages, system, max_tokens, json_mode=json_mode)
+        return await asyncio.wait_for(coro, timeout=self.timeout)
 
     async def stream(
         self,
@@ -121,8 +126,10 @@ class ModelProvider:
     ) -> BaseModel:
         """Return a validated Pydantic instance using provider-native structured output."""
         if self._is_anthropic(model):
-            return await self._anthropic_structured(model, schema, messages, system, max_tokens)
-        return await self._openai_structured(model, schema, messages, system, max_tokens)
+            coro = self._anthropic_structured(model, schema, messages, system, max_tokens)
+        else:
+            coro = self._openai_structured(model, schema, messages, system, max_tokens)
+        return await asyncio.wait_for(coro, timeout=self.timeout)
 
     # ── Anthropic ────────────────────────────────────────────────────
 

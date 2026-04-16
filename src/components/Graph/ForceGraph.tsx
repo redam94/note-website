@@ -69,17 +69,20 @@ export default function ForceGraph({
 }: ForceGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredNode, setHoveredNode] = useState<number | null>(null);
-  // Persist node positions and zoom between data updates so existing nodes
-  // don't bounce when new nodes are added.
+  // Persist node positions and zoom between data updates
   const nodePositionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const zoomTransformRef = useRef<d3.ZoomTransform | null>(null);
+  // Persist zoom behavior so we don't re-attach listeners on every update
+  const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  // Persist simulation so we can stop it before replacing
+  const simRef = useRef<d3.Simulation<SimNode, SimLink> | null>(null);
 
   useEffect(() => {
     if (!svgRef.current || !data.nodes.length) return;
 
     const svg = d3.select(svgRef.current);
-    svg.selectAll("*").remove();
 
+    // ── Filter nodes/edges for local mode ────────────────────────────
     let filteredNodes = data.nodes;
     let filteredEdges = data.edges;
 
@@ -96,7 +99,7 @@ export default function ForceGraph({
       );
     }
 
-    // Build a neighbor map so new nodes can be seeded near a connected node
+    // ── Build neighbor map for position seeding ───────────────────────
     const edgeNeighbors = new Map<number, number[]>();
     filteredEdges.forEach((e) => {
       if (!edgeNeighbors.has(e.source)) edgeNeighbors.set(e.source, []);
@@ -108,11 +111,7 @@ export default function ForceGraph({
     const posCache = nodePositionsRef.current;
     const nodes: SimNode[] = filteredNodes.map((n) => {
       const cached = posCache.get(n.id);
-      if (cached) {
-        // Existing node — restore last known position so it doesn't move
-        return { ...n, x: cached.x, y: cached.y };
-      }
-      // New node — try to seed near a connected neighbor that has a position
+      if (cached) return { ...n, x: cached.x, y: cached.y };
       const neighbors = edgeNeighbors.get(n.id) ?? [];
       for (const nbId of neighbors) {
         const nbPos = posCache.get(nbId);
@@ -122,14 +121,12 @@ export default function ForceGraph({
           return { ...n, x: nbPos.x + Math.cos(angle) * r, y: nbPos.y + Math.sin(angle) * r };
         }
       }
-      // No neighbor found — seed near center with small random jitter
       const angle = Math.random() * 2 * Math.PI;
       const r = Math.random() * 80;
       return { ...n, x: width / 2 + Math.cos(angle) * r, y: height / 2 + Math.sin(angle) * r };
     });
 
     const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
     const links: SimLink[] = filteredEdges
       .filter((e) => nodeMap.has(e.source) && nodeMap.has(e.target))
       .map((e) => ({
@@ -139,34 +136,31 @@ export default function ForceGraph({
         confidence: e.confidence,
       }));
 
-    const g = svg.append("g");
+    // ── Select-or-create persistent SVG structure ─────────────────────
+    let g = svg.select<SVGGElement>("g.fg-root");
+    if (g.empty()) g = svg.append("g").attr("class", "fg-root");
 
-    const zoom = d3
-      .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.1, 4])
-      .on("zoom", (event) => {
-        zoomTransformRef.current = event.transform;
-        g.attr("transform", event.transform);
-      });
-    svg.call(zoom);
-    // Restore previous zoom/pan so the view doesn't jump on data updates
+    // Zoom — create once, update handler references svgRef so no stale closure
+    if (!zoomBehaviorRef.current) {
+      const zoom = d3.zoom<SVGSVGElement, unknown>()
+        .scaleExtent([0.1, 4])
+        .on("zoom", (event) => {
+          zoomTransformRef.current = event.transform;
+          d3.select(svgRef.current!).select("g.fg-root").attr("transform", event.transform);
+        });
+      svg.call(zoom);
+      zoomBehaviorRef.current = zoom;
+    }
     if (zoomTransformRef.current) {
-      svg.call(zoom.transform, zoomTransformRef.current);
+      svg.call(zoomBehaviorRef.current.transform, zoomTransformRef.current);
     }
 
-    // Use a lower starting alpha when most nodes are already positioned —
-    // this keeps existing nodes nearly still while new ones settle in.
-    const hasNewNodes = filteredNodes.some((n) => !posCache.has(n.id));
-    const startAlpha = hasNewNodes && posCache.size > 0 ? 0.25 : 1;
-
-    const simulation = d3
-      .forceSimulation(nodes)
-      .alpha(startAlpha)
-      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(60).strength(0.15))
-      .force("charge", d3.forceManyBody().strength(-40).distanceMax(300))
-      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.03))
-      .force("collision", d3.forceCollide().radius((d: any) => nodeRadius(d) + 2).strength(0.4))
-      .alphaDecay(0.015);
+    let linkGroup = g.select<SVGGElement>("g.fg-links");
+    if (linkGroup.empty()) linkGroup = g.append("g").attr("class", "fg-links");
+    let nodeGroup = g.select<SVGGElement>("g.fg-nodes");
+    if (nodeGroup.empty()) nodeGroup = g.append("g").attr("class", "fg-nodes");
+    let labelGroup = g.select<SVGGElement>("g.fg-labels");
+    if (labelGroup.empty()) labelGroup = g.append("g").attr("class", "fg-labels");
 
     // Node radius helper
     function nodeRadius(d: SimNode): number {
@@ -174,21 +168,43 @@ export default function ForceGraph({
       return Math.max(1.8, Math.min(7, 1.8 + Math.sqrt(d.degree) * 1.4));
     }
 
-    // Edges — thin, translucent lines
-    const link = g
-      .append("g")
-      .selectAll("line")
+    // ── Join links (key by source+target+rel) ─────────────────────────
+    const link = linkGroup
+      .selectAll<SVGLineElement, SimLink>("line")
       .data(links)
       .join("line")
       .attr("stroke", "#c8c5bc")
       .attr("stroke-opacity", 0.15)
       .attr("stroke-width", 0.5);
 
-    // Nodes — filled circles colored by note type
-    const node = g
-      .append("g")
-      .selectAll("circle")
-      .data(nodes)
+    // ── Join labels ───────────────────────────────────────────────────
+    const label = labelGroup
+      .selectAll<SVGTextElement, SimNode>("text")
+      .data(nodes, (d) => String(d.id))
+      .join("text")
+      .text((d) => d.title)
+      .attr("font-size", 9)
+      .attr("dx", (d) => nodeRadius(d) + 4)
+      .attr("dy", 3)
+      .attr("fill", "#5a5545")
+      .attr("opacity", 0)
+      .attr("class", "select-none pointer-events-none");
+
+    // ── Join nodes — re-attach ALL handlers on every update ───────────
+    const drag = d3.drag<SVGCircleElement, SimNode>()
+      .on("start", (event, d) => {
+        if (!event.active) simRef.current?.alphaTarget(0.3).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on("end", (event, d) => {
+        if (!event.active) simRef.current?.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      });
+
+    const node = nodeGroup
+      .selectAll<SVGCircleElement, SimNode>("circle")
+      .data(nodes, (d) => String(d.id))
       .join("circle")
       .attr("r", (d) => nodeRadius(d))
       .attr("fill", (d) => getNodeColor(d))
@@ -233,38 +249,26 @@ export default function ForceGraph({
         label.attr("opacity", 0);
       })
       .on("click", (_event, d) => onNodeClick?.(d.slug))
-      .call(
-        d3
-          .drag<SVGCircleElement, SimNode>()
-          .on("start", (event, d) => {
-            if (!event.active) simulation.alphaTarget(0.3).restart();
-            d.fx = d.x;
-            d.fy = d.y;
-          })
-          .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
-          .on("end", (event, d) => {
-            if (!event.active) simulation.alphaTarget(0);
-            d.fx = null;
-            d.fy = null;
-          }) as any
-      );
+      .call(drag as any);
 
-    // Labels
-    const label = g
-      .append("g")
-      .selectAll("text")
-      .data(nodes)
-      .join("text")
-      .text((d) => d.title)
-      .attr("font-size", 9)
-      .attr("dx", (d) => nodeRadius(d) + 4)
-      .attr("dy", 3)
-      .attr("fill", "#5a5545")
-      .attr("opacity", 0)
-      .attr("class", "select-none pointer-events-none");
+    // ── Stop previous simulation and start fresh ──────────────────────
+    simRef.current?.stop();
+
+    const hasNewNodes = filteredNodes.some((n) => !posCache.has(n.id));
+    const startAlpha = hasNewNodes && posCache.size > 0 ? 0.25 : 1;
+
+    const simulation = d3
+      .forceSimulation(nodes)
+      .alpha(startAlpha)
+      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(60).strength(0.15))
+      .force("charge", d3.forceManyBody().strength(-40).distanceMax(300))
+      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.03))
+      .force("collision", d3.forceCollide().radius((d: any) => nodeRadius(d) + 2).strength(0.4))
+      .alphaDecay(0.015);
+
+    simRef.current = simulation;
 
     simulation.on("tick", () => {
-      // Persist every node's position so the next render can restore them
       nodes.forEach((n) => {
         if (n.x != null && n.y != null) {
           nodePositionsRef.current.set(n.id, { x: n.x, y: n.y });

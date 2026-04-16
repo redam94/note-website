@@ -28,6 +28,7 @@ async def search_notes(
     q: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    limit: int = Query(default=20, ge=1, le=200),
 ) -> list[SearchResult]:
     """Keyword search — fast, no LLM."""
     if not q:
@@ -38,7 +39,7 @@ async def search_notes(
         select(Note)
         .where(Note.space_id == current_space.id)
         .where(or_(Note.title.like(pattern), Note.content.like(pattern)))
-        .limit(20)
+        .limit(limit)
     )
     rows = result.scalars().all()
 

@@ -11,7 +11,6 @@ Streaming protocol:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from collections import defaultdict
@@ -19,7 +18,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_user_with_key
@@ -29,8 +28,8 @@ from ..models.graph_edge import GraphEdge
 from ..models.note import Note
 from ..models.space import Space
 from ..prompts import load_prompt
-from ..services.graph_search import find_by_tag, find_related, get_neighbors, grep_notes
 from ..services.model_provider import get_provider, get_setting
+from ..services.retrieval import execute_retrieval
 
 router = APIRouter(prefix="/api")
 
@@ -63,19 +62,6 @@ class ChatRequest(BaseModel):
 # ── Retrieval helpers ─────────────────────────────────────────────────
 
 
-def _score_note(note: Note, search_terms: list[str], seed_ids: set[int]) -> float:
-    s = 10.0 if note.id in seed_ids else 0.0
-    tl = note.title.lower()
-    cl = (note.content or "")[:3000].lower()
-    for term in search_terms:
-        t = term.lower()
-        if t in tl:
-            s += 3.0
-        if t in cl:
-            s += 1.0
-    return s
-
-
 async def _retrieve(
     db: AsyncSession,
     question: str,
@@ -85,7 +71,6 @@ async def _retrieve(
 
     Returns (ranked_notes, all_titles).
     """
-    # All notes for title list + fallback lookup
     all_result = await db.execute(select(Note).where(Note.space_id == space_id))
     all_notes = all_result.scalars().all()
     if not all_notes:
@@ -100,59 +85,19 @@ async def _retrieve(
         if len(w) > 3
     ))
     search_terms = words[:5]
-
-    # ── Parallel retrieval ────────────────────────────────────────────
-    grep_tasks = [grep_notes(db, term, limit=8, space_id=space_id) for term in search_terms[:4]]
-    grep_results = await asyncio.gather(*grep_tasks, return_exceptions=True)
-
-    collected_ids: set[int] = set()
-    for r in grep_results:
-        if isinstance(r, list):
-            for item in r:
-                collected_ids.add(item["id"])
-
-    # Infer tags from question words and search by tag
     inferred_tags = [f"topic/{w}" for w in search_terms[:3]]
-    tag_tasks = [find_by_tag(db, tag, limit=6, space_id=space_id) for tag in inferred_tags]
-    tag_results = await asyncio.gather(*tag_tasks, return_exceptions=True)
-    for r in tag_results:
-        if isinstance(r, list):
-            for item in r:
-                collected_ids.add(item["id"])
 
-    # Fallback: LIKE search if too few results
-    if len(collected_ids) < 5 and search_terms:
-        for term in search_terms[:3]:
-            like = f"%{term}%"
-            fb_result = await db.execute(
-                select(Note)
-                .where(Note.space_id == space_id)
-                .where(or_(Note.title.like(like), Note.content.like(like)))
-                .limit(6)
-            )
-            for n in fb_result.scalars().all():
-                collected_ids.add(n.id)
-
-    # Initial ranking to find seeds
-    candidates = [note_map[nid] for nid in collected_ids if nid in note_map]
-    candidates.sort(key=lambda n: _score_note(n, search_terms, set()), reverse=True)
-    seed_ids = {n.id for n in candidates[:3]}
-
-    # ── Graph expansion: 1-hop neighbors of top seeds ─────────────────
-    nbr_tasks = [get_neighbors(db, sid, direction="both") for sid in list(seed_ids)[:3]]
-    nbr_results = await asyncio.gather(*nbr_tasks, return_exceptions=True)
-    for r in nbr_results:
-        if isinstance(r, dict) and "neighbors" in r:
-            for nbr in r["neighbors"]:
-                collected_ids.add(nbr["id"])
-
-    # Final ranking
-    final_candidates = [note_map[nid] for nid in collected_ids if nid in note_map]
-    final_candidates.sort(
-        key=lambda n: _score_note(n, search_terms, seed_ids),
-        reverse=True,
+    ranked = await execute_retrieval(
+        db=db,
+        space_id=space_id,
+        search_terms=search_terms,
+        relevant_tags=inferred_tags,
+        seed_ids=[],
+        question=question,
+        note_map=note_map,
+        top_k=20,
     )
-    return final_candidates[:20], all_titles
+    return ranked, all_titles
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────

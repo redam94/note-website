@@ -8,10 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from slugify import slugify
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import AuthUser, require_admin, require_user_with_key
+from ..auth import require_user_with_key
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.graph_edge import GraphEdge
@@ -19,13 +19,8 @@ from ..models.note import Note
 from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.ask import AskRequest
-from ..services.graph_search import (
-    find_by_tag,
-    find_related,
-    get_neighbors,
-    grep_notes,
-)
 from ..services.model_provider import get_provider, get_setting
+from ..services.retrieval import execute_retrieval
 
 router = APIRouter(prefix="/api")
 
@@ -33,128 +28,6 @@ QA_SYSTEM = load_prompt("qa").format()
 RETRIEVAL_SYSTEM = load_prompt("retrieval").format()
 
 _STATUS_PREFIX = "<<STATUS>>"
-
-
-# ── Graph-search-based retrieval ──────────────────────────────────────
-
-
-async def _retrieve_notes(
-    db: AsyncSession,
-    question: str,
-    provider,
-    status_fn,
-    model: str,
-) -> tuple[list, list[str]]:
-    """Use Haiku + graph search tools to find the most relevant notes.
-
-    Returns (relevant_notes, all_titles).
-    """
-    # Load all notes for catalog + lookup
-    all_result = await db.execute(select(Note))
-    all_notes = all_result.scalars().all()
-    if not all_notes:
-        return [], []
-
-    note_map = {n.id: n for n in all_notes}
-    all_titles = [n.title for n in all_notes]
-
-    # Build compact catalog for Haiku
-    catalog_lines = []
-    for n in all_notes:
-        tags_raw = n.tags or "[]"
-        try:
-            tags = json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
-        except (json.JSONDecodeError, TypeError):
-            tags = []
-        summary = (n.summary or n.content[:120]).replace("\n", " ")[:100]
-        catalog_lines.append(f"ID:{n.id} | {n.title} | tags:{','.join(tags[:3])} | {summary}")
-
-    # ── Haiku plans retrieval strategy ────────────────────────────────
-    await status_fn("Planning retrieval strategy...")
-
-    search_terms = []
-    relevant_tags = []
-    seed_ids = []
-
-    try:
-        plan_response = await provider.complete(
-            messages=[{
-                "role": "user",
-                "content": f"Question: {question}\n\nNote catalog ({len(all_notes)} notes):\n" + "\n".join(catalog_lines),
-            }],
-            system=RETRIEVAL_SYSTEM,
-            max_tokens=1024,
-            model=model,
-        )
-        json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
-        if json_match:
-            plan = json.loads(json_match.group())
-            search_terms = plan.get("search_terms", [])
-            relevant_tags = plan.get("relevant_tags", [])
-            seed_ids = plan.get("seed_note_ids", [])
-            reasoning = plan.get("reasoning", "")
-            if reasoning:
-                await status_fn(f"Strategy: {reasoning[:80]}")
-    except Exception:
-        search_terms = [w for w in question.lower().split() if len(w) > 3]
-
-    # ── Execute graph search tools ────────────────────────────────────
-    await status_fn("Searching with graph tools...")
-    collected_ids: set[int] = set()
-
-    # Grep for each search term
-    for term in search_terms[:4]:
-        results = await grep_notes(db, term, limit=8)
-        for r in results:
-            collected_ids.add(r["id"])
-
-    # Tag search
-    for tag in relevant_tags[:3]:
-        results = await find_by_tag(db, tag, limit=6)
-        for r in results:
-            collected_ids.add(r["id"])
-
-    # Graph expansion: 1-hop neighbors of seed notes
-    for sid in seed_ids[:3]:
-        if sid in note_map:
-            collected_ids.add(sid)
-            nbrs = await get_neighbors(db, sid, direction="both")
-            if "neighbors" in nbrs:
-                for n in nbrs["neighbors"]:
-                    collected_ids.add(n["id"])
-
-    # 2-hop related notes for top seeds
-    for sid in seed_ids[:2]:
-        if sid in note_map:
-            related = await find_related(db, sid, limit=5)
-            for r in related:
-                collected_ids.add(r["id"])
-
-    # Fallback if too few results
-    if len(collected_ids) < 5:
-        for w in [w for w in question.lower().split() if len(w) > 3][:3]:
-            result = await db.execute(
-                select(Note).where(
-                    or_(Note.title.like(f"%{w}%"), Note.content.like(f"%{w}%"))
-                ).limit(6)
-            )
-            for n in result.scalars().all():
-                collected_ids.add(n.id)
-
-    # Build sorted list
-    relevant = [note_map[nid] for nid in collected_ids if nid in note_map]
-
-    def score(note):
-        s = 10 if note.id in seed_ids else 0
-        tl = note.title.lower()
-        cl = (note.content or "")[:2000].lower()
-        for term in search_terms:
-            if term.lower() in tl: s += 3
-            if term.lower() in cl: s += 1
-        return s
-
-    relevant.sort(key=score, reverse=True)
-    return relevant[:15], all_titles
 
 
 # ── Ask endpoint ──────────────────────────────────────────────────────
@@ -174,11 +47,8 @@ async def ask_knowledge_base(
 
         provider = await get_provider(db)
         ask_model = await get_setting(db, "model_ask")
+        planner_model = await get_setting(db, "model_outline")
 
-        async def status_fn(msg: str):
-            pass  # Can't yield from nested async — status updates come from yield below
-
-        # Run retrieval (we yield status updates inline)
         all_result = await db.execute(select(Note).where(Note.space_id == current_space.id))
         all_notes = all_result.scalars().all()
 
@@ -189,7 +59,7 @@ async def ask_knowledge_base(
         note_map = {n.id: n for n in all_notes}
         all_titles = [n.title for n in all_notes]
 
-        # Build catalog
+        # Build compact catalog for Haiku planner
         catalog_lines = []
         for n in all_notes:
             tags_raw = n.tags or "[]"
@@ -200,11 +70,12 @@ async def ask_knowledge_base(
             summary = (n.summary or n.content[:120]).replace("\n", " ")[:100]
             catalog_lines.append(f"ID:{n.id} | {n.title} | tags:{','.join(tags[:3])} | {summary}")
 
-        # Haiku plans retrieval
+        # Haiku plans retrieval strategy
         yield f"{_STATUS_PREFIX}Planning retrieval strategy...\n"
 
-        search_terms = []
-        seed_ids = []
+        search_terms: list[str] = []
+        relevant_tags: list[str] = []
+        seed_ids: list[int] = []
 
         try:
             plan_response = await provider.complete(
@@ -214,7 +85,7 @@ async def ask_knowledge_base(
                 }],
                 system=RETRIEVAL_SYSTEM,
                 max_tokens=1024,
-                model=model,
+                model=planner_model,
             )
             json_match = re.search(r"\{.*\}", plan_response, re.DOTALL)
             if json_match:
@@ -227,62 +98,20 @@ async def ask_knowledge_base(
                     yield f"{_STATUS_PREFIX}Strategy: {reasoning[:80]}\n"
             else:
                 search_terms = [w for w in body.question.lower().split() if len(w) > 3]
-                relevant_tags = []
         except Exception:
             search_terms = [w for w in body.question.lower().split() if len(w) > 3]
-            relevant_tags = []
 
-        # Execute graph search
         yield f"{_STATUS_PREFIX}Searching with graph tools...\n"
-        collected_ids: set[int] = set()
-
-        for term in search_terms[:4]:
-            results = await grep_notes(db, term, limit=8)
-            for r in results:
-                collected_ids.add(r["id"])
-
-        for tag in relevant_tags[:3]:
-            results = await find_by_tag(db, tag, limit=6)
-            for r in results:
-                collected_ids.add(r["id"])
-
-        for sid in seed_ids[:3]:
-            if sid in note_map:
-                collected_ids.add(sid)
-                nbrs = await get_neighbors(db, sid, direction="both")
-                if "neighbors" in nbrs:
-                    for n in nbrs["neighbors"]:
-                        collected_ids.add(n["id"])
-
-        for sid in seed_ids[:2]:
-            if sid in note_map:
-                related = await find_related(db, sid, limit=5)
-                for r in related:
-                    collected_ids.add(r["id"])
-
-        if len(collected_ids) < 5:
-            for w in [w for w in body.question.lower().split() if len(w) > 3][:3]:
-                result = await db.execute(
-                    select(Note).where(Note.space_id == current_space.id).where(
-                        or_(Note.title.like(f"%{w}%"), Note.content.like(f"%{w}%"))
-                    ).limit(6)
-                )
-                for n in result.scalars().all():
-                    collected_ids.add(n.id)
-
-        relevant_notes = [note_map[nid] for nid in collected_ids if nid in note_map]
-
-        def score(note):
-            s = 10 if note.id in seed_ids else 0
-            tl = note.title.lower()
-            cl = (note.content or "")[:2000].lower()
-            for term in search_terms:
-                if term.lower() in tl: s += 3
-                if term.lower() in cl: s += 1
-            return s
-
-        relevant_notes.sort(key=score, reverse=True)
-        relevant_notes = relevant_notes[:15]
+        relevant_notes = await execute_retrieval(
+            db=db,
+            space_id=current_space.id,
+            search_terms=search_terms,
+            relevant_tags=relevant_tags,
+            seed_ids=seed_ids,
+            question=body.question,
+            note_map=note_map,
+            top_k=15,
+        )
 
         source_titles = [n.title for n in relevant_notes[:5]]
         yield f"{_STATUS_PREFIX}Found {len(relevant_notes)} relevant notes\n"

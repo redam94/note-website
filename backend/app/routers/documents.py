@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,8 +76,18 @@ def _note_is_stub(note: Note) -> bool:
 
 
 @router.get("/documents")
-async def list_documents(db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> list[DocumentResponse]:
-    result = await db.execute(select(Document).where(Document.space_id == current_space.id))
+async def list_documents(
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[DocumentResponse]:
+    result = await db.execute(
+        select(Document)
+        .where(Document.space_id == current_space.id)
+        .offset(offset)
+        .limit(limit)
+    )
     rows = result.scalars().all()
 
     responses = []
