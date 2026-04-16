@@ -35,6 +35,10 @@ export default function Sidebar() {
   const isAdmin = role === "admin";
   const [showNewSpace, setShowNewSpace] = useState(false);
   const [newSpaceName, setNewSpaceName] = useState("");
+  const [showNewNote, setShowNewNote] = useState(false);
+  const [newNoteTitle, setNewNoteTitle] = useState("");
+  const [newNoteParentId, setNewNoteParentId] = useState<number | "">("");
+  const [creatingNote, setCreatingNote] = useState(false);
 
   // Stable fetchTree — reads spaceSlug/pathname from refs so it never goes stale
   const fetchTree = useCallback(async () => {
@@ -206,6 +210,43 @@ export default function Sidebar() {
     window.addEventListener(REFRESH_EVENT, fetchTree);
     return () => window.removeEventListener(REFRESH_EVENT, fetchTree);
   }, [spaceSlug, fetchTree]);
+
+  // Flat list of all nodes for parent picker
+  function flattenTree(nodes: TreeNode[]): TreeNode[] {
+    const result: TreeNode[] = [];
+    function walk(node: TreeNode) {
+      result.push(node);
+      node.children.forEach(walk);
+    }
+    nodes.forEach(walk);
+    return result;
+  }
+  const flatNodes = flattenTree(tree);
+
+  async function handleCreateNote(e: React.FormEvent) {
+    e.preventDefault();
+    const title = newNoteTitle.trim();
+    if (!title) return;
+    setCreatingNote(true);
+    try {
+      const res = await fetch(apiUrl("/api/notes", spaceSlugRef.current), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          parent_id: newNoteParentId === "" ? null : newNoteParentId,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const created = await res.json();
+      setNewNoteTitle("");
+      setNewNoteParentId("");
+      setShowNewNote(false);
+      window.dispatchEvent(new Event("sidebar-refresh"));
+      router.push(`/notes/${created.slug}`);
+    } catch { /* silent */ }
+    finally { setCreatingNote(false); }
+  }
 
   function toggleExpand(id: number) {
     setExpandedIds((prev) => {
@@ -430,6 +471,15 @@ export default function Sidebar() {
           <div className="flex gap-1">
             {isAdmin && (
               <>
+                <button
+                  onClick={() => setShowNewNote((v) => !v)}
+                  className="p-1 text-[var(--muted)] hover:text-[var(--accent)] transition-colors rounded hover:bg-[var(--surface2)]"
+                  title="New note"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </button>
                 <Link href="/maintenance" className="p-1 text-[var(--muted)] hover:text-[var(--accent)] transition-colors" title="Maintenance">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -450,6 +500,46 @@ export default function Sidebar() {
             )}
           </div>
         </div>
+
+        {/* New note form */}
+        {showNewNote && isAdmin && (
+          <form onSubmit={handleCreateNote} className="mx-2 mb-2 p-2 bg-[var(--bg)] border border-[var(--border)] rounded-lg">
+            <input
+              type="text"
+              value={newNoteTitle}
+              onChange={(e) => setNewNoteTitle(e.target.value)}
+              placeholder="Note title..."
+              autoFocus
+              className="w-full px-2 py-1.5 mb-1.5 text-[12px] bg-[var(--surface)] border border-[var(--border)] rounded text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent-light)]"
+            />
+            <select
+              value={newNoteParentId}
+              onChange={(e) => setNewNoteParentId(e.target.value === "" ? "" : Number(e.target.value))}
+              className="w-full px-2 py-1.5 mb-2 text-[12px] bg-[var(--surface)] border border-[var(--border)] rounded text-[var(--text-secondary)] focus:outline-none focus:border-[var(--accent-light)]"
+            >
+              <option value="">No parent (root)</option>
+              {flatNodes.map((n) => (
+                <option key={n.id} value={n.id}>{n.title}</option>
+              ))}
+            </select>
+            <div className="flex gap-1">
+              <button
+                type="submit"
+                disabled={creatingNote || !newNoteTitle.trim()}
+                className="flex-1 px-2 py-1 text-[11px] font-medium bg-[var(--accent)] text-white rounded hover:opacity-90 disabled:opacity-50 transition-opacity"
+              >
+                {creatingNote ? "..." : "Create"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowNewNote(false); setNewNoteTitle(""); setNewNoteParentId(""); }}
+                className="px-2 py-1 text-[11px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
 
         {tree.length === 0 ? (
           <p className="text-[12px] text-[var(--muted)] px-3 py-4">No notes yet.</p>

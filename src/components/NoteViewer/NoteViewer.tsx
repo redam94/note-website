@@ -8,7 +8,7 @@ import { useSpace } from "@/contexts/SpaceContext";
 import { apiUrl } from "@/lib/api";
 import LocalGraph from "@/components/Graph/LocalGraph";
 import NoteContent from "@/components/NoteContent";
-import type { NoteWithLinks, GraphData } from "@/types";
+import type { NoteWithLinks, GraphData, GraphNode } from "@/types";
 
 interface NoteViewerProps {
   slug: string;
@@ -80,6 +80,20 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [submittingComment, setSubmittingComment] = useState(false);
+
+  // Inline edit state
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Move note state
+  const [showMoveModal, setShowMoveModal] = useState(false);
+  const [allNotes, setAllNotes] = useState<GraphNode[]>([]);
+  const [moveSearch, setMoveSearch] = useState("");
+  const [moving, setMoving] = useState(false);
+
   const router = useRouter();
   const { role } = useAuth();
   const { spaceSlug } = useSpace();
@@ -94,13 +108,15 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
     setReprocessResult(null);
     Promise.all([
       fetch(apiUrl(`/api/notes/${slug}`, spaceSlug)).then((r) => (r.ok ? r.json() : Promise.reject("Not found"))),
-      fetch(apiUrl("/api/graph", spaceSlug)).then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
       fetch(apiUrl(`/api/notes/${slug}/comments`, spaceSlug)).then((r) => (r.ok ? r.json() : [])),
     ])
-      .then(([noteData, graph, commentsData]) => {
+      .then(([noteData, commentsData]) => {
         setNote(noteData);
-        setGraphData(graph);
         setComments(commentsData);
+        // Fetch local graph after we have the note ID — much cheaper than /api/graph
+        return fetch(apiUrl(`/api/graph/local/${noteData.id}`, spaceSlug))
+          .then((r) => (r.ok ? r.json() : { nodes: [], edges: [] }))
+          .then((localGraph) => setGraphData(localGraph));
       })
       .catch((err) => setError(typeof err === "string" ? err : "Failed to load note"))
       .finally(() => setLoading(false));
@@ -194,6 +210,79 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
     }
   }
 
+  function startEditing() {
+    if (!note) return;
+    setEditTitle(note.title);
+    setEditContent(note.content);
+    setSaveError(null);
+    setEditing(true);
+  }
+
+  async function handleSaveEdit() {
+    if (!note) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(apiUrl(`/api/notes/${slug}`, spaceSlug), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: editTitle, content: editContent }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      // Re-fetch the full note (backend only returns slug+title, not full content)
+      const noteRes = await fetch(apiUrl(`/api/notes/${slug}`, spaceSlug));
+      if (noteRes.ok) setNote(await noteRes.json());
+      setEditing(false);
+      window.dispatchEvent(new Event("sidebar-refresh"));
+    } catch (e: any) {
+      setSaveError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function openMoveModal() {
+    setMoveSearch("");
+    setShowMoveModal(true);
+    if (allNotes.length === 0) {
+      try {
+        const res = await fetch(apiUrl("/api/graph", spaceSlug));
+        if (res.ok) {
+          const data = await res.json();
+          setAllNotes(data.nodes as GraphNode[]);
+        }
+      } catch { /* silent */ }
+    }
+  }
+
+  async function handleMove(newParentId: number | null) {
+    if (!note) return;
+    setMoving(true);
+    try {
+      const res = await fetch(apiUrl(`/api/notes/${slug}/parent`, spaceSlug), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent_id: newParentId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      setShowMoveModal(false);
+      window.dispatchEvent(new Event("sidebar-refresh"));
+      // Reload note to reflect updated level/parent
+      const noteRes = await fetch(apiUrl(`/api/notes/${slug}`, spaceSlug));
+      if (noteRes.ok) setNote(await noteRes.json());
+    } catch (e: any) {
+      alert(`Move failed: ${(e as Error).message}`);
+    } finally {
+      setMoving(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -251,6 +340,26 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
             <div className="flex-shrink-0 mt-1 flex items-center gap-1">
               {isAdmin && (
                 <>
+                  {/* Edit button */}
+                  <button
+                    onClick={startEditing}
+                    className="p-1 text-[var(--muted)] hover:text-[var(--accent)] transition-colors"
+                    title="Edit note"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                  </button>
+                  {/* Move button */}
+                  <button
+                    onClick={openMoveModal}
+                    className="p-1 text-[var(--muted)] hover:text-[var(--accent)] transition-colors"
+                    title="Move note"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h7M3 12h7M3 17h7M17 3l4 4-4 4M21 7h-7" />
+                    </svg>
+                  </button>
                   {/* Reprocess button */}
                   <button
                     onClick={() => setShowReprocessForm(!showReprocessForm)}
@@ -357,8 +466,51 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
           </div>
         )}
 
-        {/* Content */}
-        <NoteContent content={note.content} className="text-[15px] leading-[1.8]" />
+        {/* Inline edit form */}
+        {editing ? (
+          <div className="mb-5">
+            <input
+              type="text"
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              className="w-full px-3 py-2 mb-3 text-[20px] font-bold bg-[var(--bg)] border border-[var(--border)] rounded-lg text-[var(--heading)] focus:outline-none focus:border-[var(--accent-light)]"
+              placeholder="Note title..."
+            />
+            <textarea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              className="w-full px-3 py-2 text-[14px] font-mono bg-[var(--bg)] border border-[var(--border)] rounded-lg text-[var(--text)] focus:outline-none focus:border-[var(--accent-light)] resize-none"
+              rows={24}
+              placeholder="Note content (Markdown)..."
+            />
+            {saveError && (
+              <p className="mt-2 text-[12px] text-[var(--danger)]">{saveError}</p>
+            )}
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                onClick={handleSaveEdit}
+                disabled={saving || !editTitle.trim()}
+                className="px-4 py-1.5 text-[13px] font-medium bg-[var(--accent)] text-white rounded hover:opacity-90 disabled:opacity-50 transition-opacity"
+              >
+                {saving ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Saving...
+                  </span>
+                ) : "Save"}
+              </button>
+              <button
+                onClick={() => setEditing(false)}
+                className="px-4 py-1.5 text-[13px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* Content */
+          <NoteContent content={note.content} className="text-[15px] leading-[1.8]" />
+        )}
 
         {/* Comments section */}
         <div className="mt-10 pt-6 border-t border-[var(--border)]">
@@ -454,6 +606,64 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
           )}
         </div>
       </div>
+
+      {/* ── Move modal ── */}
+      {showMoveModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => setShowMoveModal(false)}
+        >
+          <div
+            className="bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-xl w-full max-w-md mx-4 p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-[15px] font-semibold text-[var(--heading)] mb-3">Move Note</h3>
+            <input
+              type="text"
+              value={moveSearch}
+              onChange={(e) => setMoveSearch(e.target.value)}
+              placeholder="Search for a parent note..."
+              autoFocus
+              className="w-full px-3 py-2 mb-3 text-[13px] bg-[var(--bg)] border border-[var(--border)] rounded text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent-light)]"
+            />
+            <div className="max-h-64 overflow-y-auto space-y-1">
+              {/* Option: move to root */}
+              <button
+                onClick={() => handleMove(null)}
+                disabled={moving}
+                className="w-full text-left px-3 py-2 text-[13px] rounded hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] text-[var(--text-secondary)] transition-colors"
+              >
+                (No parent — move to root)
+              </button>
+              {allNotes
+                .filter(
+                  (n) =>
+                    n.id !== note?.id &&
+                    n.title.toLowerCase().includes(moveSearch.toLowerCase())
+                )
+                .slice(0, 30)
+                .map((n) => (
+                  <button
+                    key={n.id}
+                    onClick={() => handleMove(n.id)}
+                    disabled={moving}
+                    className="w-full text-left px-3 py-2 text-[13px] rounded hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] text-[var(--text-secondary)] transition-colors"
+                  >
+                    {n.title}
+                  </button>
+                ))}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => setShowMoveModal(false)}
+                className="px-3 py-1.5 text-[12px] bg-[var(--surface2)] text-[var(--text-secondary)] rounded hover:bg-[var(--border)] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Right sidebar ── */}
       <div className="w-[300px] flex-shrink-0 border-l border-[var(--border)] hidden lg:block">

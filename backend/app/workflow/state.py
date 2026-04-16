@@ -42,5 +42,11 @@ class ProcessingState(TypedDict):
     cross_links: list[dict]
     # Populated by community_update node
     community_updates: list[dict]
+    # Extraction profile (optional) — set by the upload router before pipeline starts
+    extraction_profile_id: int | None
+    # Overrides the classifier doc_type when set by an extraction profile
+    doc_type_override: str | None
+    # Extra instructions injected into the LLM system prompt during note creation
+    prompt_additions: str
     # Error tracking
     error: str | None

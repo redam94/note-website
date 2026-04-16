@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 
 interface SettingsData {
   anthropic_api_key: string;
@@ -246,6 +247,26 @@ export default function SettingsPage() {
         >
           {saving ? "Saving..." : "Save Settings"}
         </button>
+
+        {/* Extraction profiles */}
+        <section className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-1">Extraction Profiles</h2>
+              <p className="text-[13px] text-[var(--text-secondary)]">
+                Map custom file extensions (e.g. <code className="font-mono text-[11px]">.eml</code>,{" "}
+                <code className="font-mono text-[11px]">.zip</code>) to Python extraction scripts that
+                transform raw files before the pipeline runs.
+              </p>
+            </div>
+            <Link
+              href="/settings/extraction"
+              className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium border border-[var(--border)] rounded-lg text-[var(--text-secondary)] hover:border-[var(--accent-light)] hover:text-[var(--accent)] transition-all"
+            >
+              Manage →
+            </Link>
+          </div>
+        </section>
 
       </div>
     </div>

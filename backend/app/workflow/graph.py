@@ -73,3 +73,16 @@ workflow.add_edge("cross_link",        "community_update")
 workflow.add_edge("community_update",  END)
 
 processing_pipeline = workflow.compile()
+
+# Per-document pipeline used in batch mode: parse → insert_links only.
+# cross_link and community_update are run once across all batch docs afterward.
+_PER_DOC_NODES = NODE_ORDER[: NODE_ORDER.index("cross_link")]
+
+_per_doc_workflow = StateGraph(ProcessingState)
+for _name in _PER_DOC_NODES:
+    _per_doc_workflow.add_node(_name, _nodes[_name])
+_per_doc_workflow.set_entry_point(_PER_DOC_NODES[0])
+for _i in range(len(_PER_DOC_NODES) - 1):
+    _per_doc_workflow.add_edge(_PER_DOC_NODES[_i], _PER_DOC_NODES[_i + 1])
+_per_doc_workflow.add_edge(_PER_DOC_NODES[-1], END)
+per_doc_pipeline = _per_doc_workflow.compile()

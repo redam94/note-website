@@ -14,13 +14,14 @@ from ..config import settings
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.document import Document
+from ..models.extraction_profile import ExtractionProfile
 from ..models.note import Note
 from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.document import DocumentResponse
 from ..schemas.note_output import NoteOutput
 from ..services.model_provider import get_provider, get_setting
-from ..worker import run_processing_pipeline
+from ..worker import run_batch_pipeline, run_processing_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,28 @@ MIME_MAP = {
 def get_mime_type(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
     return MIME_MAP.get(ext, "text/plain")
+
+
+async def _find_matching_profile(
+    filename: str, space_id: int, db: AsyncSession
+) -> ExtractionProfile | None:
+    """Return the first extraction profile whose extensions list includes
+    this file's extension (without the leading dot)."""
+    import json as _json
+    ext = os.path.splitext(filename)[1].lstrip(".").lower()
+    if not ext:
+        return None
+    result = await db.execute(
+        select(ExtractionProfile).where(ExtractionProfile.space_id == space_id)
+    )
+    for profile in result.scalars().all():
+        try:
+            exts = _json.loads(profile.extensions or "[]")
+        except Exception:
+            exts = []
+        if ext in [e.lstrip(".").lower() for e in exts]:
+            return profile
+    return None
 
 
 def _note_is_stub(note: Note) -> bool:
@@ -89,20 +112,30 @@ async def upload_document(
 ) -> DocumentResponse:
     os.makedirs(settings.uploads_dir, exist_ok=True)
 
-    ext = os.path.splitext(file.filename or "")[1]
-    filename = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(settings.uploads_dir, filename)
+    original_name = file.filename or "unknown"
+    ext = os.path.splitext(original_name)[1].lower()
+
+    # Accept the file if it matches a known MIME type OR an extraction profile extension.
+    profile = await _find_matching_profile(original_name, current_space.id, db)
+    if ext not in MIME_MAP and profile is None:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Upload a PDF, DOCX, MD, or TXT file, or create an extraction profile for this extension.",
+        )
+
+    dest_filename = f"{uuid.uuid4()}{ext}"
+    file_path = os.path.join(settings.uploads_dir, dest_filename)
 
     content = await file.read()
     async with aiofiles.open(file_path, "wb") as f:
         await f.write(content)
 
-    mime_type = get_mime_type(file.filename or "")
+    mime_type = get_mime_type(original_name)
     now = datetime.now(timezone.utc).isoformat()
 
     doc = Document(
-        filename=filename,
-        original_name=file.filename or "unknown",
+        filename=dest_filename,
+        original_name=original_name,
         mime_type=mime_type,
         status="pending",
         created_at=now,
@@ -112,6 +145,8 @@ async def upload_document(
     await db.commit()
     await db.refresh(doc)
 
+    extraction_profile_id = profile.id if profile else None
+
     # Process document asynchronously
     if settings.use_redis:
         from arq import create_pool
@@ -119,11 +154,13 @@ async def upload_document(
 
         pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
         await pool.enqueue_job(
-            "process_document_job", doc.id, file_path, mime_type, file.filename or "unknown", current_space.id
+            "process_document_job", doc.id, file_path, mime_type, original_name, current_space.id,
+            extraction_profile_id,
         )
     else:
         background_tasks.add_task(
-            run_processing_pipeline, doc.id, file_path, mime_type, file.filename or "unknown", current_space.id
+            run_processing_pipeline, doc.id, file_path, mime_type, original_name, current_space.id,
+            extraction_profile_id,
         )
 
     return DocumentResponse.from_row(doc)
@@ -152,10 +189,16 @@ async def upload_complete(
     background_tasks: BackgroundTasks,
     session_id: str = Form(...),
     filename: str = Form(...),
+    defer_processing: bool = Form(False),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
 ) -> DocumentResponse:
-    """Finalize a chunked upload: move the assembled file and start processing."""
+    """Finalize a chunked upload: move the assembled file and start processing.
+
+    When defer_processing=True the document record is created but the pipeline
+    is not started — used by the batch upload flow so all docs can be kicked
+    off together via /documents/batch-finalize.
+    """
     tmp_dir = os.path.join(settings.uploads_dir, ".chunks")
     tmp_path = os.path.join(tmp_dir, session_id)
 
@@ -163,7 +206,15 @@ async def upload_complete(
         raise HTTPException(status_code=404, detail="Upload session not found")
 
     os.makedirs(settings.uploads_dir, exist_ok=True)
-    ext = os.path.splitext(filename)[1]
+    ext = os.path.splitext(filename)[1].lower()
+
+    profile = await _find_matching_profile(filename, current_space.id, db)
+    if ext not in MIME_MAP and profile is None:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Create an extraction profile for this extension first.",
+        )
+
     dest_filename = f"{uuid.uuid4()}{ext}"
     dest_path = os.path.join(settings.uploads_dir, dest_filename)
     os.rename(tmp_path, dest_path)
@@ -183,20 +234,74 @@ async def upload_complete(
     await db.commit()
     await db.refresh(doc)
 
+    if not defer_processing:
+        extraction_profile_id = profile.id if profile else None
+
+        if settings.use_redis:
+            from arq import create_pool
+            from arq.connections import RedisSettings
+
+            pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+            await pool.enqueue_job(
+                "process_document_job", doc.id, dest_path, mime_type, filename, current_space.id,
+                extraction_profile_id,
+            )
+        else:
+            background_tasks.add_task(
+                run_processing_pipeline, doc.id, dest_path, mime_type, filename, current_space.id,
+                extraction_profile_id,
+            )
+
+    return DocumentResponse.from_row(doc)
+
+
+class BatchFinalizeRequest(BaseModel):
+    doc_ids: list[int]
+
+
+@router.post("/documents/batch-finalize", status_code=202, dependencies=[Depends(require_admin)])
+async def batch_finalize(
+    payload: BatchFinalizeRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+) -> list[DocumentResponse]:
+    """Start parallel extraction + shared cross-link for a set of uploaded-but-deferred documents."""
+    if not payload.doc_ids:
+        raise HTTPException(status_code=422, detail="No document IDs provided")
+
+    result = await db.execute(
+        select(Document).where(
+            Document.id.in_(payload.doc_ids),
+            Document.space_id == current_space.id,
+        )
+    )
+    docs = result.scalars().all()
+
+    if len(docs) != len(payload.doc_ids):
+        raise HTTPException(status_code=404, detail="One or more documents not found")
+
+    batch_doc_infos: list[dict] = []
+    for doc in docs:
+        profile = await _find_matching_profile(doc.original_name, current_space.id, db)
+        batch_doc_infos.append({
+            "document_id": doc.id,
+            "file_path": os.path.join(settings.uploads_dir, doc.filename),
+            "mime_type": doc.mime_type,
+            "original_name": doc.original_name,
+            "extraction_profile_id": profile.id if profile else None,
+        })
+
     if settings.use_redis:
         from arq import create_pool
         from arq.connections import RedisSettings
 
         pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
-        await pool.enqueue_job(
-            "process_document_job", doc.id, dest_path, mime_type, filename, current_space.id
-        )
+        await pool.enqueue_job("process_batch_job", batch_doc_infos, current_space.id)
     else:
-        background_tasks.add_task(
-            run_processing_pipeline, doc.id, dest_path, mime_type, filename, current_space.id
-        )
+        background_tasks.add_task(run_batch_pipeline, batch_doc_infos, current_space.id)
 
-    return DocumentResponse.from_row(doc)
+    return [DocumentResponse.from_row(doc) for doc in docs]
 
 
 # ── Stub detection & repair ──────────────────────────────────────────

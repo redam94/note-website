@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import ForceGraph from "@/components/Graph/ForceGraph";
@@ -87,6 +87,7 @@ export default function Home() {
   }, [rootIndex]);
 
   const toc = useMemo(() => (rootIndex ? extractToc(rootIndex.content) : []), [rootIndex]);
+  const handleNodeClick = useCallback((slug: string) => router.push(`/notes/${slug}`), [router]);
   const topLevel = notes.filter((n) => n.level <= 1);
 
   if (loading) {
@@ -130,7 +131,7 @@ export default function Home() {
                 >
                   <ForceGraph
                     data={graphData}
-                    onNodeClick={(slug) => router.push(`/notes/${slug}`)}
+                    onNodeClick={handleNodeClick}
                     width={graphDims.width}
                     height={graphDims.height}
                     mode="global"

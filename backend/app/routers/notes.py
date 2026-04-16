@@ -102,6 +102,221 @@ async def get_note(slug: str, db: AsyncSession = Depends(get_db), current_space:
     return NoteWithLinks.from_row(note, backlinks, outlinks)
 
 
+# ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _make_slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "note"
+
+
+async def _unique_slug(db: AsyncSession, base: str, space_id: int, exclude_id: int | None = None) -> str:
+    slug, i = base, 2
+    while True:
+        q = select(Note).where(Note.slug == slug, Note.space_id == space_id)
+        if exclude_id is not None:
+            q = q.where(Note.id != exclude_id)
+        if not (await db.execute(q)).scalar_one_or_none():
+            return slug
+        slug = f"{base}-{i}"
+        i += 1
+
+
+# ── Edit note ─────────────────────────────────────────────────────────
+
+
+class NoteUpdate(BaseModel):
+    title: str | None = None
+    content: str | None = None
+    tags: list[str] | None = None
+    chapter: str | None = None
+    source: str | None = None
+    summary: str | None = None
+
+
+@router.patch("/notes/{slug}", dependencies=[Depends(require_admin)])
+async def update_note(
+    slug: str,
+    body: NoteUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+):
+    result = await db.execute(
+        select(Note).where(Note.slug == slug, Note.space_id == current_space.id)
+    )
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    # If title changed, update wiki-links in other notes
+    if body.title is not None and body.title.strip() != note.title:
+        old_title = note.title
+        new_title = body.title.strip()
+        note.title = new_title
+
+        all_res = await db.execute(
+            select(Note).where(Note.id != note.id, Note.space_id == current_space.id)
+        )
+        for other in all_res.scalars().all():
+            if old_title not in (other.content or ""):
+                continue
+            updated = re.sub(
+                r"\[\[" + re.escape(old_title) + r"\|([^\]]+)\]\]",
+                r"[[" + new_title + r"|\1]]",
+                other.content,
+            )
+            updated = re.sub(
+                r"\[\[" + re.escape(old_title) + r"\]\]",
+                f"[[{new_title}]]",
+                updated,
+            )
+            if updated != other.content:
+                other.content = updated
+
+    if body.content is not None:
+        note.content = body.content
+    if body.tags is not None:
+        note.tags = json.dumps(body.tags)
+    if body.chapter is not None:
+        note.chapter = body.chapter or None
+    if body.source is not None:
+        note.source = body.source or None
+    if body.summary is not None:
+        note.summary = body.summary or None
+
+    await db.commit()
+    await db.refresh(note)
+
+    return {"slug": note.slug, "title": note.title}
+
+
+# ── Create note ───────────────────────────────────────────────────────
+
+
+class NoteCreate(BaseModel):
+    title: str
+    content: str = ""
+    parent_id: int | None = None
+    tags: list[str] = []
+
+
+@router.post("/notes", dependencies=[Depends(require_admin)])
+async def create_note(
+    body: NoteCreate,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required")
+
+    # Determine level from parent
+    level = 1
+    if body.parent_id:
+        parent_res = await db.execute(
+            select(Note).where(Note.id == body.parent_id, Note.space_id == current_space.id)
+        )
+        parent = parent_res.scalar_one_or_none()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent note not found")
+        level = min(parent.level + 1, 3)
+
+    slug = await _unique_slug(db, _make_slug(title), current_space.id)
+
+    note = Note(
+        title=title,
+        content=body.content,
+        slug=slug,
+        tags=json.dumps(body.tags),
+        level=level,
+        parent_id=body.parent_id,
+        space_id=current_space.id,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    db.add(note)
+    await db.flush()  # get note.id before creating edge
+
+    # Create part_of edge if parent given (source=child, target=parent per sidebar convention)
+    if body.parent_id:
+        edge = GraphEdge(
+            source_id=note.id,
+            target_id=body.parent_id,
+            relationship_type="part_of",
+            confidence=1.0,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        db.add(edge)
+
+    await db.commit()
+    await db.refresh(note)
+
+    window = {"sidebar-refresh": True}  # signal to frontend
+    return {"id": note.id, "slug": note.slug, "title": note.title, **window}
+
+
+# ── Move note ─────────────────────────────────────────────────────────
+
+
+class NoteMove(BaseModel):
+    parent_id: int | None  # None = move to root
+
+
+@router.patch("/notes/{slug}/parent", dependencies=[Depends(require_admin)])
+async def move_note(
+    slug: str,
+    body: NoteMove,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+):
+    result = await db.execute(
+        select(Note).where(Note.slug == slug, Note.space_id == current_space.id)
+    )
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    if body.parent_id == note.id:
+        raise HTTPException(status_code=400, detail="A note cannot be its own parent")
+
+    # Validate new parent belongs to the same space
+    if body.parent_id is not None:
+        par_res = await db.execute(
+            select(Note).where(Note.id == body.parent_id, Note.space_id == current_space.id)
+        )
+        if not par_res.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Parent note not found")
+
+    # Remove existing part_of edge (source=this note, relationship=part_of)
+    await db.execute(
+        delete(GraphEdge).where(
+            GraphEdge.source_id == note.id,
+            GraphEdge.relationship_type == "part_of",
+        )
+    )
+
+    # Update parent_id and recalculate level
+    note.parent_id = body.parent_id
+    if body.parent_id is None:
+        note.level = 1
+    else:
+        par_res2 = await db.execute(select(Note).where(Note.id == body.parent_id))
+        parent = par_res2.scalar_one_or_none()
+        note.level = min((parent.level + 1) if parent else 1, 3)
+
+    # Create new part_of edge if moving under a parent
+    if body.parent_id is not None:
+        edge = GraphEdge(
+            source_id=note.id,
+            target_id=body.parent_id,
+            relationship_type="part_of",
+            confidence=1.0,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        db.add(edge)
+
+    await db.commit()
+    return {"slug": note.slug, "parent_id": note.parent_id, "level": note.level}
+
+
 @router.delete("/notes/{slug}", dependencies=[Depends(require_admin)])
 async def delete_note(slug: str, db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)):
     """Delete a note and clean up all dead cross-links.

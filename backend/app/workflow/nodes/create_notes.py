@@ -414,10 +414,13 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             note_output: NoteOutput | None = None
             is_fallback = False
             try:
+                _system = NOTE_SYSTEM
+                if state.get("prompt_additions"):
+                    _system = _system + "\n\n" + state["prompt_additions"]
                 note_output = await provider.complete_structured(
                     NoteOutput,
                     messages=[{"role": "user", "content": base_prompt}],
-                    system=NOTE_SYSTEM,
+                    system=_system,
                     max_tokens=8192,
                     model=model,
                 )
@@ -468,10 +471,13 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                     )
 
                 try:
+                    _system_retry = NOTE_SYSTEM
+                    if state.get("prompt_additions"):
+                        _system_retry = _system_retry + "\n\n" + state["prompt_additions"]
                     retry_output = await provider.complete_structured(
                         NoteOutput,
                         messages=[{"role": "user", "content": escalation_prompt}],
-                        system=NOTE_SYSTEM,
+                        system=_system_retry,
                         max_tokens=8192,
                         model=model,
                     )

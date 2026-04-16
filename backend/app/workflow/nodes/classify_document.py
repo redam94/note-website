@@ -97,8 +97,18 @@ def _classify(
 
 
 async def classify_document(state: ProcessingState) -> ProcessingState:
-    """Classify document type using Python heuristics — no LLM."""
+    """Classify document type using Python heuristics — no LLM.
+
+    If the active extraction profile specifies a doc_type_override, that value
+    is used directly without running the heuristics.
+    """
     doc_id = state["document_id"]
+
+    # Honour profile override (set during parse if a matching profile was found)
+    if state.get("doc_type_override"):
+        doc_type = state["doc_type_override"]
+        await set_step(doc_id, f"Document type overridden by extraction profile: {doc_type}")
+        return {**state, "doc_type": doc_type}
 
     doc_metadata = state.get("doc_metadata", {})
     total_pages = doc_metadata.get("total_pages", len(state.get("page_texts", [])))
