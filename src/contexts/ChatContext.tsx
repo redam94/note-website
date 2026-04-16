@@ -44,7 +44,8 @@ function loadMessages(spaceSlug: string): Message[] {
 
 function saveMessages(spaceSlug: string, messages: Message[]) {
   try {
-    localStorage.setItem(storageKey(spaceSlug), JSON.stringify(messages));
+    const trimmed = messages.slice(-200);
+    localStorage.setItem(storageKey(spaceSlug), JSON.stringify(trimmed));
   } catch { /* quota / private mode */ }
 }
 

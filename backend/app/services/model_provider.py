@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncGenerator
 
 from pydantic import BaseModel
@@ -7,6 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.settings import Settings
+
+_settings_cache: dict[str, tuple[str, float]] = {}
+_CACHE_TTL = 60.0
+
+
+def clear_settings_cache() -> None:
+    _settings_cache.clear()
 
 DEFAULTS = {
     "anthropic_api_key": "",
@@ -27,9 +35,15 @@ DEFAULTS = {
 
 
 async def get_setting(db: AsyncSession, key: str) -> str:
+    now = time.monotonic()
+    cached = _settings_cache.get(key)
+    if cached and now - cached[1] < _CACHE_TTL:
+        return cached[0]
     result = await db.execute(select(Settings).where(Settings.key == key))
     row = result.scalar_one_or_none()
-    return row.value if row else DEFAULTS.get(key, "")
+    value = row.value if row else DEFAULTS.get(key, "")
+    _settings_cache[key] = (value, now)
+    return value
 
 
 class ModelProvider:

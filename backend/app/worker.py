@@ -259,7 +259,7 @@ async def run_batch_pipeline(
                 await db.execute(
                     update(Document)
                     .where(Document.id == doc["document_id"])
-                    .values(status="error", error=f"Cross-link finalize failed: {e}")
+                    .values(status="done", error=f"Warning: cross-link step failed: {e}")
                 )
             await db.commit()
 

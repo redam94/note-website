@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not os.environ.get("JWT_SECRET"):
+        logger.warning(
+            "JWT_SECRET is not set — using a random secret. "
+            "All sessions will be invalidated on every restart. "
+            "Set JWT_SECRET in your .env file for persistent sessions."
+        )
+
     # SQLite pragmas
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))

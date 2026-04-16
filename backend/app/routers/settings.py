@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_admin
 from ..database import get_db
 from ..models.settings import Settings
+from ..services.model_provider import clear_settings_cache
 from ..schemas.settings import (
     ModelsResponse,
     SettingsResponse,
@@ -99,6 +100,7 @@ async def update_settings(
             await set_setting(db, key, val)
 
     await db.commit()
+    clear_settings_cache()
     return await get_settings(db)
 
 

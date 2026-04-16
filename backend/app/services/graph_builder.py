@@ -53,12 +53,16 @@ async def build_full_graph(db: AsyncSession, space_id: int | None = None) -> Ful
 
     note_ids = {n.id for n in all_notes}
 
-    edges_result = await db.execute(select(GraphEdge))
-    # Filter edges to only include those between notes in this space
-    all_edges = [
-        e for e in edges_result.scalars().all()
-        if e.source_id in note_ids and e.target_id in note_ids
-    ] if space_id is not None else edges_result.scalars().all()
+    if space_id is not None:
+        note_ids_subq = select(Note.id).where(Note.space_id == space_id).scalar_subquery()
+        edge_query = select(GraphEdge).where(
+            GraphEdge.source_id.in_(note_ids_subq),
+            GraphEdge.target_id.in_(note_ids_subq),
+        )
+    else:
+        edge_query = select(GraphEdge)
+    edges_result = await db.execute(edge_query)
+    all_edges = edges_result.scalars().all()
 
     # Build title -> id map for wiki-link resolution
     title_to_id: dict[str, int] = {}

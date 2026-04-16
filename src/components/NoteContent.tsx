@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -147,7 +148,7 @@ interface NoteContentProps {
 }
 
 export default function NoteContent({ content, className }: NoteContentProps) {
-  const blocks = parseContent(content);
+  const blocks = useMemo(() => parseContent(content), [content]);
 
   return (
     <div className={`prose max-w-none text-[15px] leading-[1.8] ${className || ""}`}>

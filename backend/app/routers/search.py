@@ -22,35 +22,6 @@ router = APIRouter(prefix="/api")
 
 SMART_SEARCH_SYSTEM = load_prompt("smart_search").format()
 
-_SMART_SEARCH_SYSTEM_LEGACY = """\
-You are a knowledge base search agent. Given a user query and a catalog of notes, \
-find the most relevant notes and explain why each is relevant.
-
-You have access to a catalog of notes with their titles, summaries, and tags. \
-Your job is to:
-
-1. Interpret what the user is actually looking for (they might use vague language)
-2. Rank the notes by relevance to the query
-3. Explain WHY each note is relevant in 1 sentence
-4. Suggest 2-3 follow-up queries the user might want to try
-
-Return ONLY valid JSON:
-{
-  "interpretation": "What the user is looking for in precise terms",
-  "results": [
-    {"id": 1, "relevance": "Why this note matches the query", "score": 0.95}
-  ],
-  "suggested_queries": ["follow-up query 1", "follow-up query 2"]
-}
-
-Rules:
-- Return at most 10 results, ranked by relevance
-- Score from 0.0 to 1.0 (1.0 = perfect match)
-- Only include notes with score >= 0.3
-- The relevance explanation should be specific, not generic
-- Suggested queries should explore related angles the user hasn't asked about
-"""
-
 
 @router.get("/search")
 async def search_notes(

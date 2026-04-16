@@ -21,14 +21,6 @@ router = APIRouter(prefix="/api")
 
 LINK_SYSTEM_PROMPT = load_prompt("link_detect").format()
 
-_LINK_SYSTEM_PROMPT_LEGACY = (
-    "You are a knowledge graph analyst. Given two notes, determine if they are semantically related.\n"
-    "If related, classify the relationship as one of: supports, contradicts, defines, example_of, part_of, references.\n"
-    "Return JSON: {\"related\": true, \"relationship\": \"...\", \"confidence\": 0.0-1.0, \"reason\": \"...\"}\n"
-    "If not related, return: {\"related\": false}\n"
-    "Return ONLY valid JSON, no other text."
-)
-
 
 async def detect_link(provider, note_a, note_b, model: str) -> dict | None:
     prompt = (
