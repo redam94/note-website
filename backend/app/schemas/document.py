@@ -17,7 +17,7 @@ class DocumentResponse(BaseModel):
     recentNotes: list[str] = []
     createdAt: str
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "frozen": False}
 
     @classmethod
     def from_row(

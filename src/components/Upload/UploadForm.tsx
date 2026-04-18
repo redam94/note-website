@@ -17,6 +17,13 @@ interface DocStatus {
   recentNotes: string[];
 }
 
+interface ExtractionProfile {
+  id: number;
+  name: string;
+  description: string;
+  extensions: string[];
+}
+
 const PIPELINE_STAGES = [
   { key: "upload", label: "Upload" },
   { key: "parse", label: "Parse document" },
@@ -62,6 +69,7 @@ async function uploadFileChunked(
   spaceSlug: string,
   onProgress: (pct: number) => void,
   deferProcessing: boolean,
+  profileSelection: string,
 ): Promise<{ id: number; originalName: string }> {
   const CHUNK_SIZE = 8 * 1024 * 1024;
   const sessionId = crypto.randomUUID();
@@ -89,6 +97,9 @@ async function uploadFileChunked(
   completeForm.append("session_id", sessionId);
   completeForm.append("filename", file.name);
   if (deferProcessing) completeForm.append("defer_processing", "true");
+  if (profileSelection && profileSelection !== "auto") {
+    completeForm.append("extraction_profile_id", profileSelection);
+  }
 
   const res = await fetch(apiUrl("/api/documents/upload-complete", spaceSlug), {
     method: "POST",
@@ -137,6 +148,12 @@ export default function UploadForm() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Extraction profile selection (applies to the next upload/batch)
+  const [profiles, setProfiles] = useState<ExtractionProfile[]>([]);
+  const [profileSelection, setProfileSelection] = useState<string>("auto");
+  const profileSelectionRef = useRef<string>("auto");
+  profileSelectionRef.current = profileSelection;
+
   const lastStepRef = useRef<string>("");
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const batchPollRef = useRef<NodeJS.Timeout | null>(null);
@@ -179,6 +196,19 @@ export default function UploadForm() {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [activityLog]);
+
+  // On mount: fetch available extraction profiles
+  useEffect(() => {
+    async function loadProfiles() {
+      try {
+        const res = await fetch(apiUrl("/api/extraction-profiles", spaceRef.current));
+        if (!res.ok) return;
+        const list = await res.json();
+        setProfiles(list);
+      } catch { /* ignore — non-admins see no profiles, which is fine */ }
+    }
+    loadProfiles();
+  }, []);
 
   // On mount: check for in-progress documents
   useEffect(() => {
@@ -355,6 +385,7 @@ export default function UploadForm() {
             spaceRef.current,
             (pct) => setUploadPct(pct),
             false,
+            profileSelectionRef.current,
           );
           setActivityLog((prev) => [...prev, "Upload complete. Starting pipeline..."]);
           setDocStatus({
@@ -398,6 +429,7 @@ export default function UploadForm() {
                 });
               },
               true, // defer_processing
+              profileSelectionRef.current,
             );
             docIds.push(doc.id);
             // Show deferred docs as "pending" immediately
@@ -409,12 +441,18 @@ export default function UploadForm() {
 
           // Kick off batch processing
           setBatchPhase("processing");
+          const finalizeBody: { doc_ids: number[]; extraction_profile_id?: string } = {
+            doc_ids: docIds,
+          };
+          if (profileSelectionRef.current && profileSelectionRef.current !== "auto") {
+            finalizeBody.extraction_profile_id = profileSelectionRef.current;
+          }
           const finalizeRes = await fetch(
             apiUrl("/api/documents/batch-finalize", spaceRef.current),
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ doc_ids: docIds }),
+              body: JSON.stringify(finalizeBody),
             },
           );
           if (!finalizeRes.ok) throw new Error(await finalizeRes.text());
@@ -483,6 +521,39 @@ export default function UploadForm() {
   return (
     <div className="max-w-[560px] mx-auto px-4 py-6 md:px-8 md:py-8">
       <h1 className="text-[24px] font-bold text-[var(--heading)] mb-6">Upload Documents</h1>
+
+      {/* Extraction profile selector */}
+      {showDropZone && (
+        <div className="mb-4">
+          <label className="block text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider mb-1.5">
+            Extraction profile
+          </label>
+          <select
+            value={profileSelection}
+            onChange={(e) => setProfileSelection(e.target.value)}
+            className="w-full px-3 py-2 text-[13px] bg-[var(--surface)] border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[var(--heading)]"
+          >
+            <option value="auto">Auto — match by file extension</option>
+            <option value="none">None — plain extraction, ignore profiles</option>
+            {profiles.length > 0 && (
+              <optgroup label="Profiles">
+                {profiles.map((p) => (
+                  <option key={p.id} value={String(p.id)}>
+                    {p.name}
+                    {p.extensions.length > 0 ? ` (${p.extensions.join(", ")})` : ""}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          {profileSelection !== "auto" && profileSelection !== "none" && (() => {
+            const p = profiles.find((x) => String(x.id) === profileSelection);
+            return p?.description ? (
+              <p className="text-[11px] text-[var(--muted)] mt-1.5">{p.description}</p>
+            ) : null;
+          })()}
+        </div>
+      )}
 
       {/* Drop zone */}
       {showDropZone && (

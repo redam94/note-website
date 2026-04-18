@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_admin
 from ..database import get_db
 from ..dependencies import get_current_space
+from ..extraction_presets import PRESETS, preset_by_key
 from ..models.extraction_profile import ExtractionProfile
 from ..models.space import Space
 
@@ -119,6 +120,86 @@ async def create_profile(
     await db.commit()
     await db.refresh(profile)
     return ProfileOut.from_row(profile)
+
+
+class PresetSummary(BaseModel):
+    key: str
+    name: str
+    description: str
+    extensions: list[str]
+    doc_type_override: str | None
+    installed: bool
+
+
+class InstallPresetsRequest(BaseModel):
+    keys: list[str]
+
+
+@router.get("/presets", dependencies=[Depends(require_admin)])
+async def list_presets(
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+) -> list[PresetSummary]:
+    """List available built-in presets, flagging which are already installed
+    in the current space (matched by preset name)."""
+    existing = await db.execute(
+        select(ExtractionProfile.name).where(ExtractionProfile.space_id == current_space.id)
+    )
+    installed_names = {n for (n,) in existing.all()}
+    return [
+        PresetSummary(
+            key=p["key"],
+            name=p["name"],
+            description=p["description"],
+            extensions=p["extensions"],
+            doc_type_override=p["doc_type_override"],
+            installed=p["name"] in installed_names,
+        )
+        for p in PRESETS
+    ]
+
+
+@router.post("/presets/install", status_code=201, dependencies=[Depends(require_admin)])
+async def install_presets(
+    body: InstallPresetsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+) -> list[ProfileOut]:
+    """Install selected presets into the current space. Skips any whose name
+    already exists (idempotent)."""
+    if not body.keys:
+        raise HTTPException(status_code=422, detail="No preset keys provided")
+
+    existing_result = await db.execute(
+        select(ExtractionProfile.name).where(ExtractionProfile.space_id == current_space.id)
+    )
+    existing_names = {n for (n,) in existing_result.all()}
+
+    now = datetime.now(timezone.utc).isoformat()
+    created: list[ExtractionProfile] = []
+    for key in body.keys:
+        preset = preset_by_key(key)
+        if preset is None:
+            raise HTTPException(status_code=404, detail=f"Unknown preset '{key}'")
+        if preset["name"] in existing_names:
+            continue
+        profile = ExtractionProfile(
+            name=preset["name"],
+            description=preset["description"],
+            extensions=json.dumps(preset["extensions"]),
+            mime_types=json.dumps(preset["mime_types"]),
+            doc_type_override=preset["doc_type_override"] or None,
+            script=preset["script"],
+            prompt_additions=preset["prompt_additions"],
+            created_at=now,
+            space_id=current_space.id,
+        )
+        db.add(profile)
+        created.append(profile)
+    await db.commit()
+    for p in created:
+        await db.refresh(p)
+    return [ProfileOut.from_row(p) for p in created]
 
 
 @router.get("/{profile_id}", dependencies=[Depends(require_admin)])

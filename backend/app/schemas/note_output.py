@@ -1,6 +1,30 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field, field_validator
+
+
+def _fix_json_latex_escapes(v: str) -> str:
+    """Repair LaTeX commands that JSON parsing corrupted into control characters.
+
+    LLMs sometimes write LaTeX without double-escaping the backslash in JSON
+    (e.g. ``\\tag`` instead of ``\\\\tag``).  Standard JSON parsers then
+    interpret the lone backslash sequences as control characters:
+
+    * ``\\b`` → U+0008 BACKSPACE  — corrupts \\bar, \\begin, \\beta, \\binom …
+    * ``\\f`` → U+000C FORM FEED  — corrupts \\frac, \\forall …
+    * ``\\t`` → U+0009 TAB        — corrupts \\tag, \\text, \\theta, \\tau …
+    * ``\\r`` → U+000D CR         — corrupts \\right, \\rho, \\rm … (not CRLF)
+
+    All four are extremely rare in normal markdown/prose, so replacing them
+    before letters is safe.
+    """
+    v = re.sub(r'\x08([a-zA-Z])', r'\\b\1', v)   # backspace → \b
+    v = re.sub(r'\x0c([a-zA-Z])', r'\\f\1', v)   # form feed → \f
+    v = re.sub(r'\x09([a-zA-Z])', r'\\t\1', v)   # tab       → \t
+    v = re.sub(r'\x0d(?!\n)([a-zA-Z])', r'\\r\1', v)  # bare CR → \r
+    return v
 
 
 class NoteOutput(BaseModel):
@@ -52,11 +76,15 @@ class NoteOutput(BaseModel):
         ),
     )
 
+    @field_validator("summary", "overview", "main_content", "examples", "connections", mode="after")
+    @classmethod
+    def _fix_latex_escapes(cls, v: str) -> str:
+        return _fix_json_latex_escapes(v)
+
     @field_validator("main_content")
     @classmethod
     def _fix_inline_display_math(cls, v: str) -> str:
         """Expand single-line display math ($$...$$) to multi-line form."""
-        import re
         def _expand(m: re.Match) -> str:
             inner = m.group(1).strip()
             return f"$$\n{inner}\n$$"

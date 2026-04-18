@@ -3,13 +3,14 @@ import logging
 
 from sqlalchemy import select, update
 
+from .config import settings
 from .database import async_session
 from .models.document import Document
 from .workflow.checkpoint import clear_checkpoint, load_checkpoint
 from .workflow.graph import NODE_ALIASES, NODE_ORDER, _nodes, per_doc_pipeline, processing_pipeline
 from .workflow.nodes.community_update import update_communities
 from .workflow.nodes.cross_link import detect_cross_links
-from .workflow.progress import set_step
+from .workflow.progress import clear_progress, set_step
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ async def run_processing_pipeline(
             await processing_pipeline.ainvoke(state)
 
         await clear_checkpoint(document_id)
+        await clear_progress(document_id)
         async with async_session() as db:
             await db.execute(
                 update(Document).where(Document.id == document_id).values(status="done")
@@ -123,6 +125,7 @@ async def run_processing_pipeline(
 
     except Exception as e:
         logger.exception("Processing failed for doc %d", document_id)
+        await clear_progress(document_id)
         async with async_session() as db:
             await db.execute(
                 update(Document).where(Document.id == document_id)
@@ -191,7 +194,13 @@ async def run_batch_pipeline(
                 await db.commit()
             return e
 
-    results = await asyncio.gather(*[_run_one(doc) for doc in batch_docs])
+    sem = asyncio.Semaphore(settings.doc_concurrency)
+
+    async def _run_one_bounded(doc: dict):
+        async with sem:
+            return await _run_one(doc)
+
+    results = await asyncio.gather(*[_run_one_bounded(doc) for doc in batch_docs])
 
     successful: list[dict] = []
     all_created_notes: list[dict] = []
@@ -305,7 +314,8 @@ async def resume_interrupted_documents():
 class WorkerSettings:
     functions = [process_document_job, process_batch_job]
     try:
-        from arq.connections import RedisSettings
-        redis_settings = RedisSettings()
-    except ImportError:
+        from arq.connections import RedisSettings as _RS
+        from .config import settings as _s
+        redis_settings = _RS.from_dsn(_s.redis_url)
+    except (ImportError, Exception):
         pass

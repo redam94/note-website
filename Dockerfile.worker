@@ -1,0 +1,30 @@
+# ARQ worker service — async document processing
+# Same Python codebase as the backend, different entry point.
+# Deploy as a separate Cloud Run service with min-instances=1.
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/backend
+
+COPY backend/pyproject.toml .
+RUN pip install --no-cache-dir .
+
+COPY backend/app/ app/
+COPY backend/alembic/ alembic/
+COPY backend/alembic.ini .
+COPY backend/worker-start.sh .
+RUN chmod +x worker-start.sh
+
+ENV DATABASE_URL=/data/knowledge.db
+ENV UPLOADS_DIR=/data/uploads
+ENV DOC_CONCURRENCY=1
+
+# ARQ worker doesn't serve HTTP but Cloud Run requires a port listener.
+# worker-start.sh starts a minimal health probe on 8080.
+EXPOSE 8080
+
+CMD ["./worker-start.sh"]

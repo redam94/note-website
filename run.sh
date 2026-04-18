@@ -66,10 +66,53 @@ else:
 "
 
 # ── Background: sync DB to GCS every 60 seconds ─────────────────────
+# If the worker sentinel exists, merge its writes before pushing to GCS.
+WORKER_DB="worker.db"
+SENTINEL="$GCS_DATA/.worker_synced"
+
+merge_worker_db() {
+  if [ -f "$SENTINEL" ] && [ -f "$GCS_DATA/$WORKER_DB" ]; then
+    echo "Merging worker database..."
+    python3 - <<'PYEOF'
+import os, sqlite3
+local = os.environ.get("DATABASE_URL", "/app/localdata/knowledge.db")
+worker = "/data/worker.db"
+if not os.path.exists(worker):
+    exit(0)
+conn = sqlite3.connect(local)
+conn.execute(f"ATTACH DATABASE '{worker}' AS worker")
+tables = ["notes", "graph_edges", "subgraph_nodes", "subgraph_edges", "note_links"]
+for t in tables:
+    try:
+        conn.execute(f"INSERT OR IGNORE INTO {t} SELECT * FROM worker.{t}")
+    except Exception as e:
+        print(f"  skip {t}: {e}")
+# Propagate document status updates from worker (done/error)
+try:
+    conn.execute("""
+        UPDATE documents SET status = w.status, error = w.error,
+          processing_step = w.processing_step
+        FROM worker.documents w
+        WHERE documents.id = w.id
+          AND w.status IN ('done','error')
+          AND documents.status = 'processing'
+    """)
+except Exception as e:
+    print(f"  skip document status merge: {e}")
+conn.commit()
+conn.execute("DETACH DATABASE worker")
+conn.close()
+print("Worker merge complete")
+PYEOF
+    rm -f "$SENTINEL"
+  fi
+}
+
 (
   while true; do
     sleep 60
     if [ -f "$LOCAL_DATA/$DB_FILE" ] && [ -d "$GCS_DATA" ]; then
+      merge_worker_db
       cp "$LOCAL_DATA/$DB_FILE" "$GCS_DATA/$DB_FILE" 2>/dev/null || true
       # Sync new uploads
       if [ -d "$LOCAL_DATA/uploads" ]; then
@@ -83,6 +126,7 @@ SYNC_PID=$!
 # ── Graceful shutdown: sync before exit ──────────────────────────────
 cleanup() {
   echo "Syncing to persistent storage before exit..."
+  merge_worker_db
   cp "$LOCAL_DATA/$DB_FILE" "$GCS_DATA/$DB_FILE" 2>/dev/null || true
   cp -r "$LOCAL_DATA/uploads/"* "$GCS_DATA/uploads/" 2>/dev/null || true
   kill $SYNC_PID 2>/dev/null || true

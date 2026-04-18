@@ -62,6 +62,36 @@ async def _find_matching_profile(
     return None
 
 
+async def _resolve_profile(
+    selection: str | None, filename: str, space_id: int, db: AsyncSession
+) -> ExtractionProfile | None:
+    """Resolve a user-supplied profile selection to an ExtractionProfile.
+
+    selection values:
+      - None or "" or "auto" → auto-match by extension (current behavior)
+      - "none" → explicitly skip any profile
+      - numeric string → explicit profile id (must belong to space_id)
+    """
+    if selection is None or selection == "" or selection == "auto":
+        return await _find_matching_profile(filename, space_id, db)
+    if selection == "none":
+        return None
+    try:
+        profile_id = int(selection)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid extraction_profile_id '{selection}'")
+    result = await db.execute(
+        select(ExtractionProfile).where(
+            ExtractionProfile.id == profile_id,
+            ExtractionProfile.space_id == space_id,
+        )
+    )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Extraction profile {profile_id} not found")
+    return profile
+
+
 def _note_is_stub(note: Note) -> bool:
     """Detect whether a saved note is a stub by its content patterns."""
     content = note.content or ""
@@ -73,6 +103,37 @@ def _note_is_stub(note: Note) -> bool:
         "## Source Material" in content
         or len(content.strip()) < 500
     )
+
+
+async def _redis_progress_overlay(responses: list[DocumentResponse]) -> None:
+    """Overwrite processing_step / status / notesCount on in-flight documents
+    using live data from Redis (published by the ARQ worker via set_step).
+
+    Only runs when USE_REDIS=true.  Failures are silently swallowed so a Redis
+    hiccup never breaks the documents list endpoint.
+    """
+    if not settings.use_redis:
+        return
+    in_flight = [r for r in responses if r.status in ("pending", "processing")]
+    if not in_flight:
+        return
+    try:
+        import json
+        from ..workflow.progress import _get_redis
+        pool = await _get_redis()
+        keys = [f"doc:progress:{r.id}" for r in in_flight]
+        values = await pool.redis.mget(*keys)
+        for r, raw in zip(in_flight, values):
+            if raw:
+                data = json.loads(raw)
+                if data.get("processing_step"):
+                    r.processingStep = data["processing_step"]
+                if data.get("status"):
+                    r.status = data["status"]
+                if data.get("notes_count") is not None:
+                    r.notesCount = data["notes_count"]
+    except Exception:
+        pass
 
 
 @router.get("/documents")
@@ -110,6 +171,11 @@ async def list_documents(
             all_notes = all_notes_result.scalars().all()
             stub_count = sum(1 for n in all_notes if _note_is_stub(n))
         responses.append(DocumentResponse.from_row(r, recent_notes=recent_notes, stub_count=stub_count))
+
+    # When using the ARQ worker, overlay live progress from Redis so the
+    # frontend doesn't have to wait for the GCS→SQLite sync cycle.
+    await _redis_progress_overlay(responses)
+
     return responses
 
 
@@ -117,6 +183,7 @@ async def list_documents(
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    extraction_profile_id: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
 ) -> DocumentResponse:
@@ -125,12 +192,11 @@ async def upload_document(
     original_name = file.filename or "unknown"
     ext = os.path.splitext(original_name)[1].lower()
 
-    # Accept the file if it matches a known MIME type OR an extraction profile extension.
-    profile = await _find_matching_profile(original_name, current_space.id, db)
+    profile = await _resolve_profile(extraction_profile_id, original_name, current_space.id, db)
     if ext not in MIME_MAP and profile is None:
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported file type '{ext}'. Upload a PDF, DOCX, MD, or TXT file, or create an extraction profile for this extension.",
+            detail=f"Unsupported file type '{ext}'. Upload a PDF, DOCX, MD, or TXT file, or choose an extraction profile.",
         )
 
     dest_filename = f"{uuid.uuid4()}{ext}"
@@ -200,6 +266,7 @@ async def upload_complete(
     session_id: str = Form(...),
     filename: str = Form(...),
     defer_processing: bool = Form(False),
+    extraction_profile_id: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
 ) -> DocumentResponse:
@@ -218,11 +285,11 @@ async def upload_complete(
     os.makedirs(settings.uploads_dir, exist_ok=True)
     ext = os.path.splitext(filename)[1].lower()
 
-    profile = await _find_matching_profile(filename, current_space.id, db)
+    profile = await _resolve_profile(extraction_profile_id, filename, current_space.id, db)
     if ext not in MIME_MAP and profile is None:
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported file type '{ext}'. Create an extraction profile for this extension first.",
+            detail=f"Unsupported file type '{ext}'. Choose an extraction profile for this extension.",
         )
 
     dest_filename = f"{uuid.uuid4()}{ext}"
@@ -267,6 +334,7 @@ async def upload_complete(
 
 class BatchFinalizeRequest(BaseModel):
     doc_ids: list[int]
+    extraction_profile_id: str | None = None
 
 
 @router.post("/documents/batch-finalize", status_code=202, dependencies=[Depends(require_admin)])
@@ -291,9 +359,17 @@ async def batch_finalize(
     if len(docs) != len(payload.doc_ids):
         raise HTTPException(status_code=404, detail="One or more documents not found")
 
+    explicit_selection = payload.extraction_profile_id
+    explicit_given = explicit_selection not in (None, "", "auto")
+
     batch_doc_infos: list[dict] = []
     for doc in docs:
-        profile = await _find_matching_profile(doc.original_name, current_space.id, db)
+        if explicit_given:
+            profile = await _resolve_profile(
+                explicit_selection, doc.original_name, current_space.id, db
+            )
+        else:
+            profile = await _find_matching_profile(doc.original_name, current_space.id, db)
         batch_doc_infos.append({
             "document_id": doc.id,
             "file_path": os.path.join(settings.uploads_dir, doc.filename),

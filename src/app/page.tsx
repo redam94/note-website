@@ -44,8 +44,11 @@ export default function Home() {
   const [notes, setNotes] = useState<NotePreview[]>([]);
   const [rootIndex, setRootIndex] = useState<RootIndex | null>(null);
   const [loading, setLoading] = useState(true);
+  const [graphModalOpen, setGraphModalOpen] = useState(false);
   const graphContainerRef = useRef<HTMLDivElement>(null);
-  const [graphDims, setGraphDims] = useState({ width: 300, height: 220 });
+  const graphModalContainerRef = useRef<HTMLDivElement>(null);
+  const [graphDims, setGraphDims] = useState({ width: 300, height: 360 });
+  const [graphModalDims, setGraphModalDims] = useState({ width: 900, height: 600 });
   const router = useRouter();
   const { spaceSlug } = useSpace();
 
@@ -71,20 +74,23 @@ export default function Home() {
     }).finally(() => setLoading(false));
   }, [spaceSlug]);
 
-  // Measure graph container
+  // Measure graph containers
   useEffect(() => {
     function update() {
       if (graphContainerRef.current) {
-        setGraphDims({
-          width: graphContainerRef.current.clientWidth,
-          height: 220,
+        setGraphDims({ width: graphContainerRef.current.clientWidth, height: 360 });
+      }
+      if (graphModalContainerRef.current) {
+        setGraphModalDims({
+          width: graphModalContainerRef.current.clientWidth,
+          height: graphModalContainerRef.current.clientHeight,
         });
       }
     }
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [rootIndex]);
+  }, [rootIndex, graphModalOpen]);
 
   const toc = useMemo(() => (rootIndex ? extractToc(rootIndex.content) : []), [rootIndex]);
   const handleNodeClick = useCallback((slug: string) => router.push(`/notes/${slug}`), [router]);
@@ -98,10 +104,48 @@ export default function Home() {
     );
   }
 
+  // Shared fullscreen graph modal (used by both layouts)
+  const graphModal = graphModalOpen && (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[2px]" onClick={() => setGraphModalOpen(false)} />
+      <div
+        className="fixed z-50 rounded-xl border border-[var(--border)] shadow-2xl overflow-hidden"
+        style={{ top: "4%", left: "4%", width: "92%", height: "90%", background: "var(--bg)" }}
+      >
+        <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex items-center gap-3">
+            <h2 className="text-[13px] font-semibold text-[var(--heading)]">Knowledge Graph</h2>
+            <span className="text-[11px] text-[var(--muted)]">
+              {graphData.nodes.length} nodes · {graphData.edges.length} edges
+            </span>
+          </div>
+          <button
+            onClick={() => setGraphModalOpen(false)}
+            className="p-1 text-[var(--muted)] hover:text-[var(--text)] rounded hover:bg-[var(--surface2)] transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div ref={graphModalContainerRef} className="w-full" style={{ height: "calc(100% - 37px)" }}>
+          <ForceGraph
+            data={graphData}
+            onNodeClick={(slug) => { setGraphModalOpen(false); handleNodeClick(slug); }}
+            width={graphModalDims.width}
+            height={graphModalDims.height}
+            mode="global"
+          />
+        </div>
+      </div>
+    </>
+  );
+
   // Root index exists — show two-column layout with graph + TOC sidebar
   if (rootIndex) {
     return (
       <div className="flex min-h-screen">
+        {graphModal}
         {/* Center content */}
         <div className="flex-1 max-w-[740px] mx-auto px-4 py-4 md:px-8 md:py-6">
           <div className="mb-5">
@@ -122,12 +166,24 @@ export default function Home() {
             {/* Graph */}
             {graphData.nodes.length > 0 && (
               <div>
-                <h3 className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider mb-2">
-                  Knowledge Graph
-                </h3>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wider">
+                    Knowledge Graph
+                  </h3>
+                  <button
+                    onClick={() => setGraphModalOpen(true)}
+                    className="p-1 rounded text-[var(--muted)] hover:text-[var(--accent)] hover:bg-[var(--surface2)] transition-colors"
+                    title="Expand full graph"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                    </svg>
+                  </button>
+                </div>
                 <div
                   ref={graphContainerRef}
-                  className="rounded-lg border border-[var(--border)] overflow-hidden"
+                  className="rounded-lg border border-[var(--border)] overflow-hidden cursor-pointer group relative"
+                  onClick={() => setGraphModalOpen(true)}
                 >
                   <ForceGraph
                     data={graphData}
@@ -137,9 +193,10 @@ export default function Home() {
                     mode="global"
                     showLegend={false}
                   />
+                  <div className="absolute inset-0 bg-transparent group-hover:bg-black/5 transition-colors pointer-events-none rounded-lg" />
                 </div>
                 <p className="text-[10px] text-[var(--muted)] mt-1.5 text-center">
-                  {graphData.nodes.length} nodes · {graphData.edges.length} edges
+                  {graphData.nodes.length} nodes · {graphData.edges.length} edges · click to expand
                 </p>
               </div>
             )}
@@ -188,12 +245,46 @@ export default function Home() {
   // No root index — fallback layout
   return (
     <div className="max-w-[720px] mx-auto px-4 py-6 md:px-8 md:py-8">
+      {graphModal}
+
       <div className="mb-8">
         <h1 className="text-[28px] font-bold text-[var(--heading)] mb-1">Second Brain</h1>
         <p className="text-[13px] text-[var(--text-secondary)]">
           {notes.length} notes · {graphData.edges.length} connections
         </p>
       </div>
+
+      {/* Full-width graph for no-root-index layout */}
+      {graphData.nodes.length > 0 && (
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[13px] font-semibold text-[var(--muted)] uppercase tracking-wider">Knowledge Graph</h2>
+            <button
+              onClick={() => setGraphModalOpen(true)}
+              className="text-[12px] text-[var(--link)] hover:underline"
+            >
+              Expand
+            </button>
+          </div>
+          <div
+            ref={graphContainerRef}
+            className="rounded-lg border border-[var(--border)] overflow-hidden cursor-pointer"
+            onClick={() => setGraphModalOpen(true)}
+          >
+            <ForceGraph
+              data={graphData}
+              onNodeClick={handleNodeClick}
+              width={graphDims.width}
+              height={400}
+              mode="global"
+              showLegend={false}
+            />
+          </div>
+          <p className="text-[10px] text-[var(--muted)] mt-1.5 text-center">
+            {graphData.nodes.length} nodes · {graphData.edges.length} edges · click to expand
+          </p>
+        </div>
+      )}
 
       <div className="callout callout-abstract mb-8">
         <div className="callout-title">About</div>

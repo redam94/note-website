@@ -4,6 +4,8 @@ import { useRef, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as d3 from "d3";
 import ForceGraph from "./ForceGraph";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 import type { GraphData, GraphNode } from "@/types";
 
 interface LocalGraphProps {
@@ -27,15 +29,33 @@ export default function LocalGraph({
 }: LocalGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const router = useRouter();
+  const { spaceSlug } = useSpace();
   const [modalOpen, setModalOpen] = useState(false);
+  const [fullGraph, setFullGraph] = useState<GraphData | null>(null);
+  const [fullGraphLoading, setFullGraphLoading] = useState(false);
   const nodePositionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
-  // Reset position cache when the focus note changes
   const prevFocusRef = useRef<number>(focusNodeId);
+
+  function openModal() {
+    setModalOpen(true);
+    if (!fullGraph && !fullGraphLoading) {
+      setFullGraphLoading(true);
+      fetch(apiUrl("/api/graph", spaceSlug))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((g) => {
+          setFullGraph(g ?? data);
+          setFullGraphLoading(false);
+        })
+        .catch(() => {
+          setFullGraph(data);
+          setFullGraphLoading(false);
+        });
+    }
+  }
 
   useEffect(() => {
     if (!svgRef.current || !data.nodes.length) return;
 
-    // Clear cache when navigating to a different note
     if (prevFocusRef.current !== focusNodeId) {
       nodePositionsRef.current.clear();
       prevFocusRef.current = focusNodeId;
@@ -60,7 +80,6 @@ export default function LocalGraph({
     const nodes: SimNode[] = filteredNodes.map((n) => {
       const cached = posCache.get(n.id);
       if (cached) return { ...n, x: cached.x, y: cached.y };
-      // Seed focus node at center; others nearby
       if (n.id === focusNodeId) return { ...n, x: width / 2, y: height / 2 };
       const angle = Math.random() * 2 * Math.PI;
       return { ...n, x: width / 2 + Math.cos(angle) * 40, y: height / 2 + Math.sin(angle) * 40 };
@@ -152,13 +171,13 @@ export default function LocalGraph({
   return (
     <>
       <div className="local-graph-container relative overflow-hidden group cursor-pointer"
-        onClick={() => setModalOpen(true)}>
+        onClick={openModal}>
         <svg ref={svgRef} width={width} height={height} className="w-full" viewBox={`0 0 ${width} ${height}`} />
         {/* Expand icon */}
         <button
           className="absolute top-2 right-2 p-1 rounded bg-[var(--surface)]/80 text-[var(--muted)] hover:text-[var(--accent)] opacity-0 group-hover:opacity-100 transition-opacity"
-          title="Expand graph"
-          onClick={(e) => { e.stopPropagation(); setModalOpen(true); }}
+          title="Expand full knowledge graph"
+          onClick={(e) => { e.stopPropagation(); openModal(); }}
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
@@ -166,31 +185,24 @@ export default function LocalGraph({
         </button>
       </div>
 
-      {/* Floating graph overlay */}
+      {/* Full-graph modal */}
       {modalOpen && (
         <>
-          {/* Backdrop — click to close */}
           <div
             className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[2px]"
             onClick={() => setModalOpen(false)}
           />
-          {/* Floating frame */}
           <div className="fixed z-50 rounded-xl border border-[var(--border)] shadow-2xl overflow-hidden"
-            style={{
-              top: "8%",
-              left: "10%",
-              width: "80%",
-              height: "78%",
-              background: "var(--bg)",
-            }}
+            style={{ top: "5%", left: "5%", width: "90%", height: "88%", background: "var(--bg)" }}
           >
-            {/* Header bar */}
             <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border)] bg-[var(--surface)]">
               <div className="flex items-center gap-3">
-                <h2 className="text-[13px] font-semibold text-[var(--heading)]">Graph View</h2>
-                <span className="text-[11px] text-[var(--muted)]">
-                  {data.nodes.length} nodes · {data.edges.length} edges
-                </span>
+                <h2 className="text-[13px] font-semibold text-[var(--heading)]">Knowledge Graph</h2>
+                {fullGraph && (
+                  <span className="text-[11px] text-[var(--muted)]">
+                    {fullGraph.nodes.length} nodes · {fullGraph.edges.length} edges
+                  </span>
+                )}
               </div>
               <button
                 onClick={() => setModalOpen(false)}
@@ -201,9 +213,19 @@ export default function LocalGraph({
                 </svg>
               </button>
             </div>
-            {/* Graph */}
             <div className="w-full" style={{ height: "calc(100% - 37px)" }}>
-              <GraphModal data={data} focusNodeId={focusNodeId} onNodeClick={(slug) => { setModalOpen(false); router.push(`/notes/${slug}`); }} />
+              {fullGraphLoading ? (
+                <div className="flex items-center justify-center h-full gap-2 text-[var(--muted)]">
+                  <span className="inline-block w-4 h-4 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                  <span className="text-[13px]">Loading full graph...</span>
+                </div>
+              ) : (
+                <GraphModal
+                  data={fullGraph ?? data}
+                  focusNodeId={focusNodeId}
+                  onNodeClick={(slug) => { setModalOpen(false); router.push(`/notes/${slug}`); }}
+                />
+              )}
             </div>
           </div>
         </>

@@ -12,7 +12,7 @@ from sqlalchemy import select
 from ...database import async_session
 from ...models.note import Note
 from ...prompts import load_prompt
-from ...schemas.note_output import NoteOutput
+from ...schemas.note_output import NoteOutput, _fix_json_latex_escapes
 from ...services.model_provider import get_provider, get_setting
 from ..progress import set_step
 from ..state import ProcessingState
@@ -77,6 +77,9 @@ def _normalize_content(text: str) -> str:
     - Display math on single lines
     - Excess blank lines inside callouts
     """
+    # Repair JSON-decoded LaTeX escape sequences (\tag→tab, \bar→backspace, etc.)
+    text = _fix_json_latex_escapes(text)
+
     lines = text.split("\n")
     result = []
     for line in lines:

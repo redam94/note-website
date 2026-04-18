@@ -11,6 +11,10 @@ class AppSettings(BaseSettings):
     use_redis: bool = False
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # How many documents to process in parallel during batch upload.
+    # Set to 1 on memory-constrained instances (e.g. Cloud Run small).
+    doc_concurrency: int = 2
+
     # Auth
     admin_password: str = "admin"  # Override via ADMIN_PASSWORD env var
     jwt_secret: str = secrets.token_hex(32)  # Override via JWT_SECRET for persistence across restarts

@@ -17,6 +17,15 @@ interface Profile {
   created_at: string;
 }
 
+interface PresetSummary {
+  key: string;
+  name: string;
+  description: string;
+  extensions: string[];
+  doc_type_override: string | null;
+  installed: boolean;
+}
+
 const EMPTY_PROFILE: Omit<Profile, "id" | "created_at"> = {
   name: "",
   description: "",
@@ -69,6 +78,11 @@ export default function ExtractionProfilesPage() {
   } | null>(null);
   const [testing, setTesting] = useState(false);
 
+  // Presets state
+  const [presets, setPresets] = useState<PresetSummary[]>([]);
+  const [showPresets, setShowPresets] = useState(false);
+  const [installingPreset, setInstallingPreset] = useState<string | null>(null);
+
   async function fetchProfiles() {
     try {
       const res = await fetch(apiUrl("/api/extraction-profiles", spaceSlug));
@@ -77,7 +91,34 @@ export default function ExtractionProfilesPage() {
     setLoading(false);
   }
 
-  useEffect(() => { fetchProfiles(); }, [spaceSlug]);
+  async function fetchPresets() {
+    try {
+      const res = await fetch(apiUrl("/api/extraction-profiles/presets", spaceSlug));
+      if (res.ok) setPresets(await res.json());
+    } catch { /* ignore */ }
+  }
+
+  async function installPreset(key: string) {
+    setInstallingPreset(key);
+    try {
+      const res = await fetch(
+        apiUrl("/api/extraction-profiles/presets/install", spaceSlug),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keys: [key] }),
+        },
+      );
+      if (res.ok) {
+        await fetchProfiles();
+        await fetchPresets();
+      }
+    } finally {
+      setInstallingPreset(null);
+    }
+  }
+
+  useEffect(() => { fetchProfiles(); fetchPresets(); }, [spaceSlug]);
 
   function startCreate() {
     setEditing(null);
@@ -200,6 +241,63 @@ export default function ExtractionProfilesPage() {
         the note-creation pipeline runs — enabling support for emails, codebases,
         reports, and any other format.
       </p>
+
+      {/* Presets */}
+      {presets.length > 0 && (
+        <div className="mb-6">
+          <button
+            type="button"
+            onClick={() => setShowPresets((v) => !v)}
+            className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--accent)] transition-colors"
+          >
+            <svg
+              className={`w-3 h-3 transition-transform ${showPresets ? "rotate-90" : ""}`}
+              fill="none" stroke="currentColor" viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            Built-in presets ({presets.filter((p) => !p.installed).length} available)
+          </button>
+          {showPresets && (
+            <div className="mt-3 space-y-2">
+              {presets.map((p) => (
+                <div
+                  key={p.key}
+                  className="flex items-start gap-3 p-3 bg-[var(--surface)] border border-[var(--border)] rounded-lg"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[13px] font-semibold text-[var(--heading)]">{p.name}</span>
+                      {p.extensions.map((ext) => (
+                        <span
+                          key={ext}
+                          className="px-1.5 py-0.5 text-[10px] font-mono bg-[var(--surface2)] text-[var(--text-secondary)] rounded border border-[var(--border)]"
+                        >
+                          .{ext}
+                        </span>
+                      ))}
+                      {p.doc_type_override && (
+                        <span className="px-1.5 py-0.5 text-[10px] bg-[var(--accent-bg)] text-[var(--accent)] rounded">
+                          {p.doc_type_override}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[var(--muted)] mt-0.5">{p.description}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => installPreset(p.key)}
+                    disabled={p.installed || installingPreset === p.key}
+                    className="flex-shrink-0 px-2.5 py-1 text-[11px] border rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:text-[var(--muted)] text-[var(--accent)] border-[var(--accent-light)] hover:bg-[var(--accent-bg)]"
+                  >
+                    {p.installed ? "Installed" : installingPreset === p.key ? "Installing..." : "Install"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Profile list */}
       {loading ? (
