@@ -3,8 +3,15 @@
 Each preset is a ready-to-install ExtractionProfile definition. The
 `/api/extraction-profiles/presets` endpoint lists them; `/presets/install`
 creates rows in the current space.
+
+Prompt additions live as YAML templates in `app/prompts/preset_*.yaml`
+and are loaded via the shared prompt template system.
 """
 from __future__ import annotations
+
+from functools import lru_cache
+
+from .prompts import load_prompt
 
 IPYNB_MD_SCRIPT = r'''# Convert .ipynb JSON to Markdown; pass through .md unchanged.
 import json, os, sys
@@ -45,7 +52,13 @@ else:
 '''
 
 
-PRESETS: list[dict] = [
+@lru_cache(maxsize=None)
+def _prompt_additions(name: str) -> str:
+    """Render a preset's prompt-additions YAML template. Cached after first load."""
+    return load_prompt(name).format()
+
+
+_PRESET_DEFS: list[dict] = [
     {
         "key": "code_notebooks",
         "name": "Code Examples & Notebooks",
@@ -54,15 +67,7 @@ PRESETS: list[dict] = [
         "mime_types": [],
         "doc_type_override": "tutorial",
         "script": IPYNB_MD_SCRIPT,
-        "prompt_additions": (
-            "This document is a tutorial or code walkthrough.\n"
-            "- Preserve every code block verbatim inside fenced ```language ... ``` blocks. "
-            "Never paraphrase, summarise, or reformat code.\n"
-            "- Create one note per concept, technique, or self-contained example — not per code cell.\n"
-            "- Wrap runnable examples in [!example] callouts; keep the surrounding prose explaining the WHY and the expected output.\n"
-            "- Preserve import statements and library names so the note is reproducible.\n"
-            "- Link related notes with [[wiki-links]] when a concept builds on another."
-        ),
+        "prompt_template": "preset_code_notebooks",
     },
     {
         "key": "textbook",
@@ -72,15 +77,7 @@ PRESETS: list[dict] = [
         "mime_types": [],
         "doc_type_override": "textbook",
         "script": "",
-        "prompt_additions": (
-            "This document is a textbook chapter or section.\n"
-            "- Use [!definition] for new terms, [!theorem] for formal statements (with proof sketches), "
-            "and [!example] for worked examples.\n"
-            "- Preserve all mathematical notation in LaTeX — inline with $...$ and display with $$...$$ on its own line.\n"
-            "- Create one note per major concept, not per page. A single note may span several pages of source text.\n"
-            "- Cross-link prerequisites and derived results with [[wiki-links]].\n"
-            "- Attach ^block-ids to key equations and definitions so other notes can reference them directly."
-        ),
+        "prompt_template": "preset_textbook",
     },
     {
         "key": "research_paper",
@@ -90,19 +87,36 @@ PRESETS: list[dict] = [
         "mime_types": [],
         "doc_type_override": "paper",
         "script": "",
-        "prompt_additions": (
-            "This document is an academic research paper.\n"
-            "- Create notes for: the central contribution, key notation and definitions, each major theorem/lemma "
-            "(with proof sketch if present), the methodology, the main experimental or analytical results, and open questions.\n"
-            "- Preserve every equation in LaTeX — inline with $...$, display with $$...$$ on its own line. Do not drop subscripts, "
-            "superscripts, or mathematical operators.\n"
-            "- Use [!theorem], [!definition], [!important], and [!example] callouts liberally.\n"
-            "- Link theorems to the notes containing their proofs, and cite related work with [[wiki-links]] "
-            "to other notes in the space when the concept overlaps.\n"
-            "- Attach ^block-ids (e.g. ^thm-main, ^eq-loss) to theorems and named equations so other notes can point to them."
-        ),
+        "prompt_template": "preset_research_paper",
+    },
+    {
+        "key": "research_paper_plots",
+        "name": "Research Paper + Plots",
+        "description": "Same as Research Paper, but notes may embed Plotly charts when the paper states a functional relationship or reports numbers worth visualising. Strict rules against fabricating data.",
+        "extensions": [],
+        "mime_types": [],
+        "doc_type_override": "paper",
+        "script": "",
+        "prompt_template": "preset_research_paper_plots",
     },
 ]
+
+
+def _materialize(preset: dict) -> dict:
+    """Expand a preset definition by rendering its prompt template."""
+    return {
+        "key": preset["key"],
+        "name": preset["name"],
+        "description": preset["description"],
+        "extensions": preset["extensions"],
+        "mime_types": preset["mime_types"],
+        "doc_type_override": preset["doc_type_override"],
+        "script": preset["script"],
+        "prompt_additions": _prompt_additions(preset["prompt_template"]),
+    }
+
+
+PRESETS: list[dict] = [_materialize(p) for p in _PRESET_DEFS]
 
 
 def preset_by_key(key: str) -> dict | None:

@@ -314,6 +314,60 @@ def _build_fallback_plan(outline: list[dict], folder_root: str) -> list[dict]:
     return plan
 
 
+def _dedup_plan_by_title(note_plan: list[dict]) -> list[dict]:
+    """Merge plan entries that share a title.
+
+    Parallel chapter planners occasionally converge on the same title
+    (e.g. every chapter emits a "Bayesian Data Analysis - Overview" note).
+    Without dedup, `create_notes` inserts one Note per plan entry, producing
+    N duplicate rows that the hygiene merge-candidate detector then flags.
+
+    Semantics when two entries share a title:
+      - Union of `sections`, `depends_on`, `used_by`, `tags`.
+      - Widest `page_start` / `page_end` range.
+      - `chapter` pipe-joined (preserves traceability across chapters).
+      - First non-empty `folder` / `scope` wins.
+      - First `doc_type` / `level` wins.
+    """
+    deduped: dict[str, dict] = {}
+    order: list[str] = []
+    for entry in note_plan:
+        title = (entry.get("title") or "").strip()
+        if not title:
+            continue
+        if title not in deduped:
+            deduped[title] = dict(entry)
+            order.append(title)
+            continue
+        merged = deduped[title]
+        for field in ("sections", "depends_on", "used_by", "tags"):
+            merged_set = set(merged.get(field) or [])
+            for x in entry.get(field) or []:
+                merged_set.add(x)
+            merged[field] = sorted(merged_set)
+        e_start = entry.get("page_start") or entry.get("page") or 1
+        e_end = entry.get("page_end") or e_start
+        m_start = merged.get("page_start") or merged.get("page") or 1
+        m_end = merged.get("page_end") or m_start
+        merged["page_start"] = min(m_start, e_start)
+        merged["page_end"] = max(m_end, e_end)
+        merged["page"] = merged["page_start"]
+        chapters: set[str] = set()
+        for src in (merged.get("chapter"), entry.get("chapter")):
+            if src:
+                for c in str(src).split(";"):
+                    c = c.strip()
+                    if c:
+                        chapters.add(c)
+        if chapters:
+            merged["chapter"] = "; ".join(sorted(chapters))
+        if not (merged.get("folder") or "").strip() and (entry.get("folder") or "").strip():
+            merged["folder"] = entry["folder"]
+        if not (merged.get("scope") or "").strip() and (entry.get("scope") or "").strip():
+            merged["scope"] = entry["scope"]
+    return [deduped[t] for t in order]
+
+
 def _backfill_folders(note_plan: list[dict], folder_root: str) -> None:
     """Fill empty `folder` fields in-place using surrounding context.
 
@@ -443,6 +497,15 @@ async def create_chapter_plans(state: ProcessingState) -> ProcessingState:
 
     # ── Folder backfill ───────────────────────────────────────────────
     _backfill_folders(note_plan, folder_root)
+
+    # ── Cross-chapter title dedup ─────────────────────────────────────
+    before_dedup = len(note_plan)
+    note_plan = _dedup_plan_by_title(note_plan)
+    if before_dedup != len(note_plan):
+        logger.info(
+            "Deduped %d plan entries → %d by title (merged cross-chapter collisions)",
+            before_dedup, len(note_plan),
+        )
 
     # ── Bidirectional dependency enforcement ──────────────────────────
     title_to_plan: dict[str, dict] = {p["title"]: p for p in note_plan}

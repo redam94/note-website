@@ -54,12 +54,13 @@ export default function Home() {
 
   useEffect(() => {
     Promise.all([
-      fetch(apiUrl("/api/graph", spaceSlug)).then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
+      fetch(apiUrl("/api/graph", spaceSlug, { include_topics: "true" })).then((r) => (r.ok ? r.json() : { nodes: [], edges: [] })),
       fetch(apiUrl("/api/search", spaceSlug, { q: "Index: Root" })).then((r) => (r.ok ? r.json() : [])),
     ]).then(([graph, searchResults]) => {
       setGraphData(graph);
       setNotes(
         graph.nodes
+          .filter((n: any) => n.nodeType !== "topic")
           .map((n: any) => ({ id: n.id, title: n.title, slug: n.slug, tags: n.tags || [], level: n.level }))
           .sort((a: NotePreview, b: NotePreview) => a.level - b.level || a.title.localeCompare(b.title))
       );

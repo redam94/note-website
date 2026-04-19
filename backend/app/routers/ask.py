@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import require_user_with_key
 from ..database import get_db
 from ..dependencies import get_current_space
+from ..models.document import Document
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
 from ..models.space import Space
@@ -21,6 +22,11 @@ from ..prompts import load_prompt
 from ..schemas.ask import AskRequest
 from ..services.model_provider import get_provider, get_setting
 from ..services.retrieval import execute_retrieval
+
+# Raw-source excerpt window (chars). ~3000 chars ≈ one PDF page.
+_RAW_PAGE_CHARS = 3000
+_RAW_MAX_PER_NOTE = 6000
+_RAW_MAX_NOTES = 5  # only pull raw material for the top-N most relevant notes
 
 router = APIRouter(prefix="/api")
 
@@ -117,6 +123,38 @@ async def ask_knowledge_base(
         yield f"{_STATUS_PREFIX}Found {len(relevant_notes)} relevant notes\n"
         yield f"{_STATUS_PREFIX}Sources: {', '.join(source_titles)}\n"
 
+        # ── Pull raw source excerpts from the documents behind the top notes ──
+        top_notes_for_raw = [n for n in relevant_notes[:_RAW_MAX_NOTES] if n.document_id]
+        doc_ids = list({n.document_id for n in top_notes_for_raw})
+        doc_map: dict[int, Document] = {}
+        if doc_ids:
+            yield f"{_STATUS_PREFIX}Loading raw source material...\n"
+            docs_result = await db.execute(
+                select(Document).where(
+                    Document.id.in_(doc_ids),
+                    Document.space_id == current_space.id,
+                )
+            )
+            doc_map = {d.id: d for d in docs_result.scalars().all()}
+
+        raw_excerpts: list[str] = []
+        for n in top_notes_for_raw:
+            doc = doc_map.get(n.document_id)
+            if not doc or not doc.content_raw:
+                continue
+            page = n.page or 1
+            start = max(0, (page - 2) * _RAW_PAGE_CHARS)
+            end = min(len(doc.content_raw), (page + 2) * _RAW_PAGE_CHARS)
+            excerpt = doc.content_raw[start:end] or doc.content_raw[:_RAW_MAX_PER_NOTE]
+            if len(excerpt) > _RAW_MAX_PER_NOTE:
+                excerpt = excerpt[:_RAW_MAX_PER_NOTE]
+            location = f"p. {page}" if n.page else "start"
+            raw_excerpts.append(
+                f'[Raw source: "{doc.original_name}" ({location}), cited by note "{n.title}"]\n{excerpt}'
+            )
+
+        raw_context = "\n\n---\n\n".join(raw_excerpts)
+
         # Build context and stream
         yield f"{_STATUS_PREFIX}Generating answer...\n"
 
@@ -126,13 +164,19 @@ async def ask_knowledge_base(
         )
         titles_list = "\n".join(f"- {t}" for t in all_titles[:80])
 
+        user_content_parts = [
+            f"Available note titles for [[wiki-links]]:\n{titles_list}",
+            f"Source notes:\n\n{notes_context}",
+        ]
+        if raw_context:
+            user_content_parts.append(
+                f"Raw source document excerpts (the underlying material the notes were extracted from):\n\n{raw_context}"
+            )
+        user_content_parts.append(f"Question: {body.question}")
+
         messages = [{
             "role": "user",
-            "content": (
-                f"Available note titles for [[wiki-links]]:\n{titles_list}\n\n"
-                f"Source notes:\n\n{notes_context}\n\n"
-                f"Question: {body.question}"
-            ),
+            "content": "\n\n".join(user_content_parts),
         }]
 
         async for chunk in provider.stream(

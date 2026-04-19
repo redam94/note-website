@@ -6,7 +6,7 @@ export interface GraphNode {
   tags: string[];
   degree: number;
   documentId: number | null;
-  nodeType?: "note" | "subgraph";
+  nodeType?: "note" | "subgraph" | "topic";
   summary?: string | null;
   clusterLabel?: string | null;
 }

@@ -21,6 +21,12 @@ interface SimLink extends d3.SimulationLinkDatum<SimNode> {
   confidence: number;
 }
 
+const TOPIC_COLOR = "#8a7a6a";
+
+function isTopicNode(d: GraphNode): boolean {
+  return d.nodeType === "topic";
+}
+
 export default function LocalGraph({
   data,
   focusNodeId,
@@ -40,7 +46,7 @@ export default function LocalGraph({
     setModalOpen(true);
     if (!fullGraph && !fullGraphLoading) {
       setFullGraphLoading(true);
-      fetch(apiUrl("/api/graph", spaceSlug))
+      fetch(apiUrl("/api/graph", spaceSlug, { include_topics: "true" }))
         .then((r) => (r.ok ? r.json() : null))
         .then((g) => {
           setFullGraph(g ?? data);
@@ -123,13 +129,36 @@ export default function LocalGraph({
       .selectAll("circle")
       .data(nodes)
       .join("circle")
-      .attr("r", (d) => (d.id === focusNodeId ? 5.5 : 3.5))
-      .attr("fill", (d) => (d.id === focusNodeId ? "#6b7c3f" : "#b5b0a3"))
-      .attr("stroke", (d) => (d.id === focusNodeId ? "#5a6d2f" : "none"))
-      .attr("stroke-width", (d) => (d.id === focusNodeId ? 2 : 0))
-      .attr("stroke-opacity", 0.3)
+      .attr("r", (d) => {
+        if (d.id === focusNodeId) return 5.5;
+        if (isTopicNode(d)) return Math.max(4, Math.min(10, 4 + Math.sqrt(d.degree) * 1.5));
+        return 3.5;
+      })
+      .attr("fill", (d) => {
+        if (d.id === focusNodeId) return "#6b7c3f";
+        if (isTopicNode(d)) return "none";
+        return "#b5b0a3";
+      })
+      .attr("stroke", (d) => {
+        if (d.id === focusNodeId) return "#5a6d2f";
+        if (isTopicNode(d)) return TOPIC_COLOR;
+        return "none";
+      })
+      .attr("stroke-width", (d) => {
+        if (d.id === focusNodeId) return 2;
+        if (isTopicNode(d)) return 1.5;
+        return 0;
+      })
+      .attr("stroke-opacity", (d) => (isTopicNode(d) ? 0.9 : 0.3))
+      .style("pointer-events", "all")
       .style("cursor", "pointer")
-      .on("click", (_event, d) => router.push(`/notes/${d.slug}`))
+      .on("click", (_event, d) => {
+        if (isTopicNode(d)) {
+          router.push(`/search?q=${encodeURIComponent(d.slug)}`);
+        } else {
+          router.push(`/notes/${d.slug}`);
+        }
+      })
       .call(
         d3
           .drag<SVGCircleElement, SimNode>()

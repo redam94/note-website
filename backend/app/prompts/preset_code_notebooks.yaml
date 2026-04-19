@@ -1,0 +1,28 @@
+section_order:
+  - role
+  - code_rules
+  - note_shape
+
+sections:
+  role:
+    template: >-
+      This document is a tutorial, walkthrough, or code example — a Jupyter
+      notebook export, a Medium article, or a blog post with embedded code.
+
+  code_rules:
+    template: |-
+      Code preservation:
+
+      - Preserve every code block verbatim inside fenced ```language ... ``` blocks.
+      - Never paraphrase, summarise, reformat, or rename code.
+      - Preserve import statements and library names in full.
+      - When a snippet produced output in the source, include that output in a second fenced block below the code.
+
+  note_shape:
+    template: |-
+      Note shape:
+
+      - One note per concept, technique, or self-contained example — not one note per code cell.
+      - Wrap runnable examples in `> [!example]` callouts, with the code block inside the callout.
+      - The surrounding prose must explain WHY the code does what it does, not restate WHAT it does.
+      - Link related notes with [[wiki-links]] when one concept builds on another.

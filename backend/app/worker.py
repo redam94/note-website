@@ -313,6 +313,12 @@ async def resume_interrupted_documents():
 
 class WorkerSettings:
     functions = [process_document_job, process_batch_job]
+    # Large PDFs and multi-document batches routinely take 10+ minutes end-to-end;
+    # arq's default 300s timeout expires them mid-pipeline and the worker can't
+    # cancel native C calls (pymupdf extraction), producing zombie processes.
+    job_timeout = 3600
+    keep_result = 3600
+    max_jobs = 4
     try:
         from arq.connections import RedisSettings as _RS
         from .config import settings as _s

@@ -1,0 +1,47 @@
+section_order:
+  - role
+  - note_coverage
+  - math_preservation
+  - callout_usage
+  - linking
+
+sections:
+  role:
+    template: >-
+      This document is an academic research paper. Your notes serve a
+      reader who wants to understand the paper's contribution without
+      re-reading it.
+
+  note_coverage:
+    template: |-
+      Required coverage — create at least one note for each of:
+
+      - The central contribution or claim of the paper.
+      - Key notation and definitions (one note per symbol cluster, not one per symbol).
+      - Each major theorem, lemma, or proposition — with a proof sketch if present.
+      - The methodology — algorithms, experimental setup, or analytical framework.
+      - Main results — empirical findings or theoretical consequences, with the equations that express them.
+      - Open questions, limitations, and stated future work.
+
+  math_preservation:
+    template: |-
+      Mathematical notation:
+
+      - Inline math uses `$...$` with no internal spaces. Display math requires each `$$` on its own line.
+      - Preserve every equation the paper cites by name or number. Do not drop subscripts, superscripts, or operators.
+      - Number equations with `\tag{{N}}` matching the paper when the paper numbers them.
+
+  callout_usage:
+    template: |-
+      Callouts:
+
+      - `> [!theorem]`, `> [!definition]`, `> [!important]`, `> [!example]` used liberally.
+      - Attach `^block-id` to named theorems and equations (e.g. `^thm-convergence`, `^eq-loss`) so other notes can point to them.
+
+  linking:
+    template: |-
+      Linking:
+
+      - Link theorems to the note containing their proof.
+      - Cite related work with [[wiki-links]] to other notes in the space when the concept overlaps — do not invent note titles.
+      - Keep each note atomic: if two paragraphs address different claims, they belong in different notes.

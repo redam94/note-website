@@ -22,6 +22,7 @@ from ..schemas.document import DocumentResponse
 from ..schemas.note_output import NoteOutput
 from ..services.model_provider import get_provider, get_setting
 from ..worker import run_batch_pipeline, run_processing_pipeline
+from ..workflow.note_quality import lint_issues, strip_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -93,16 +94,15 @@ async def _resolve_profile(
 
 
 def _note_is_stub(note: Note) -> bool:
-    """Detect whether a saved note is a stub by its content patterns."""
-    content = note.content or ""
-    # Strip frontmatter
-    if content.startswith("---"):
-        end = content.find("---", 3)
-        content = content[end + 3:] if end != -1 else content
-    return (
-        "## Source Material" in content
-        or len(content.strip()) < 500
-    )
+    """Detect whether a saved note is a stub or has quality issues."""
+    body = strip_frontmatter(note.content or "")
+    if "## Source Material" in body:
+        return True
+    if len(body.strip()) < 500:
+        return True
+    if lint_issues(body):
+        return True
+    return False
 
 
 async def _redis_progress_overlay(responses: list[DocumentResponse]) -> None:
@@ -425,11 +425,15 @@ async def list_stubs(
     stubs = []
     for note in notes_result.scalars().all():
         body = _body_from_content(note.content or "")
-        reason = None
+        reason: str | None = None
         if "## Source Material" in body:
             reason = "raw source material (LLM generation failed)"
         elif len(body.strip()) < 500:
             reason = f"content too short ({len(body.strip())} chars)"
+        else:
+            issues = lint_issues(body)
+            if issues:
+                reason = issues[0]
         if reason:
             stubs.append(StubNoteInfo(id=note.id, title=note.title, slug=note.slug, reason=reason))
 
@@ -465,11 +469,15 @@ async def repair_stubs(
     notes_result = await db.execute(select(Note).where(Note.document_id == doc_id))
     all_notes = notes_result.scalars().all()
 
-    stubs = [
-        n for n in all_notes
-        if "## Source Material" in _body_from_content(n.content or "")
-        or len(_body_from_content(n.content or "").strip()) < 500
-    ]
+    stubs = []
+    for n in all_notes:
+        body = _body_from_content(n.content or "")
+        if (
+            "## Source Material" in body
+            or len(body.strip()) < 500
+            or lint_issues(body)
+        ):
+            stubs.append(n)
 
     if not stubs:
         return []
@@ -480,7 +488,15 @@ async def repair_stubs(
     results: list[RepairResult] = []
 
     for note in stubs:
-        logger.info("Repairing stub '%s' (model=%s)", note.title, model)
+        existing_body = _body_from_content(note.content or "")
+        reasons = lint_issues(existing_body) if existing_body.strip() else []
+        if "## Source Material" in existing_body:
+            reasons = ["previous attempt contained raw source material"]
+        elif len(existing_body.strip()) < 500:
+            reasons = [f"previous note was too short ({len(existing_body.strip())} chars)"] + reasons
+        reason_str = "; ".join(reasons) if reasons else "previous note had quality issues"
+
+        logger.info("Repairing '%s' (model=%s): %s", note.title, model, reason_str)
         try:
             page = note.page or 1
             start = max(0, (page - 2) * 3000)
@@ -497,7 +513,10 @@ async def repair_stubs(
                 f"Available notes to link to with [[Note Title]]:\n"
                 + "\n".join(f"- {t}" for t in linkable)
                 + f"\n\nSource text from document:\n{source_text}\n\n"
-                "This note previously failed to generate properly. Create a detailed, substantive note. "
+                f"The previous version of this note had these issues: {reason_str}.\n"
+                "Produce a corrected, detailed, substantive note. "
+                "Fix every issue listed above — balance all $ and $$ delimiters, "
+                "give every callout a full body, and complete any truncated sentences. "
                 "Use [!definition], [!theorem], [!example] callouts with ^block-ids. "
                 "Include LaTeX math. Cross-link with [[wiki-links]]. "
                 "Display math must have $$ on its own line."

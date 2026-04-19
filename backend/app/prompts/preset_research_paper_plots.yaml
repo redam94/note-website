@@ -1,0 +1,139 @@
+section_order:
+  - role
+  - note_coverage
+  - math_preservation
+  - callout_usage
+  - linking
+  - plot_rules
+  - plot_format
+  - plot_examples
+
+sections:
+  role:
+    template: >-
+      This document is an academic research paper. Your notes serve a
+      reader who wants to understand the paper's contribution without
+      re-reading it. When a stated relationship, convergence rate, or
+      complexity bound would be clearer as a chart, you may embed a
+      Plotly figure inside the note.
+
+  note_coverage:
+    template: |-
+      Required coverage — create at least one note for each of:
+
+      - The central contribution or claim of the paper.
+      - Key notation and definitions.
+      - Each major theorem, lemma, or proposition with a proof sketch if present.
+      - The methodology.
+      - Main results with the equations that express them.
+      - Open questions, limitations, and stated future work.
+
+  math_preservation:
+    template: |-
+      Mathematical notation:
+
+      - Inline math uses `$...$` with no internal spaces. Display math requires each `$$` on its own line.
+      - Preserve every equation the paper cites by name or number. Do not drop subscripts, superscripts, or operators.
+      - Number equations with `\tag{{N}}` matching the paper when the paper numbers them.
+
+  callout_usage:
+    template: |-
+      Callouts:
+
+      - `> [!theorem]`, `> [!definition]`, `> [!important]`, `> [!example]` used liberally.
+      - Attach `^block-id` to named theorems and equations so other notes can point to them.
+
+  linking:
+    template: |-
+      Linking:
+
+      - Link theorems to the note containing their proof.
+      - Cite related work with [[wiki-links]] to other notes in the space when the concept overlaps — do not invent note titles.
+      - Keep each note atomic.
+
+  plot_rules:
+    template: |-
+      When to embed a Plotly figure:
+
+      - Only when the paper states a functional relationship (e.g. $f(n) = O(n \log n)$,
+        $\text{{loss}} \propto 1/\sqrt{{t}}$, a closed-form curve), a growth rate, or a
+        comparison between named methods that can be visualised cleanly.
+      - Only when a visual makes the relationship easier to grasp than the equation alone.
+      - NEVER fabricate experimental values. Do not invent table data, loss curves,
+        measurements, or points that are not stated or derivable from the paper's text.
+      - If the paper reports specific numbers (e.g. a results table), you may reproduce
+        those exact numbers as points. Otherwise, plot the stated mathematical function
+        over a reasonable domain and label the axes so the reader understands it is a
+        shape illustration, not empirical data.
+      - Most notes should have NO figure. Emit one only when it adds real value.
+      - At most one Plotly figure per note.
+      - Place the figure inside `main_content` (or `examples` if it illustrates a specific
+        worked example). Precede and follow the fenced block with a blank line.
+
+  plot_format:
+    template: |-
+      Plotly figure format — emit a fenced code block with language `plotly`
+      containing a JSON object with `data` and `layout` keys:
+
+      ```plotly
+      {{
+        "data": [ ... ],
+        "layout": {{ ... }}
+      }}
+      ```
+
+      Requirements:
+
+      - The body must be valid JSON. Use double-quoted keys and strings.
+        Do not use JavaScript comments, trailing commas, or unquoted keys.
+      - Do not place `$` or `$$` inside JSON string values — they collide with the
+        LaTeX post-processor. Use plain unicode (≤, ≥, √, π, …, ∝) in titles and labels.
+      - Always include `layout.title.text` describing what the chart shows.
+      - Always include `layout.xaxis.title.text` and `layout.yaxis.title.text`.
+      - MANDATORY: when the data is derived from a stated formula rather than measured
+        values reported in the paper, the title MUST begin with "Illustrative: ".
+        Axis labels must be plain (e.g. "iteration t", not "$t$").
+      - Keep `data` arrays short — at most ~100 points per trace. Generate points
+        by evaluating the stated function on a small grid.
+      - Do not include `config`, event handlers, or any executable code.
+
+  plot_examples:
+    template: |-
+      Example — illustrating a stated convergence rate $\text{{loss}}(t) = C / \sqrt{{t}}$:
+
+      ```plotly
+      {{
+        "data": [
+          {{
+            "type": "scatter",
+            "mode": "lines",
+            "name": "loss(t)",
+            "x": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+            "y": [1.0, 0.707, 0.5, 0.354, 0.25, 0.177, 0.125, 0.088, 0.0625, 0.0442, 0.03125]
+          }}
+        ],
+        "layout": {{
+          "title": {{ "text": "Illustrative: loss(t) = 1/√t" }},
+          "xaxis": {{ "title": {{ "text": "iteration t" }}, "type": "log" }},
+          "yaxis": {{ "title": {{ "text": "loss" }}, "type": "log" }}
+        }}
+      }}
+      ```
+
+      Example — reproducing a small results table from the paper as a grouped bar chart.
+      Use this only when the paper actually reports the numbers you plot:
+
+      ```plotly
+      {{
+        "data": [
+          {{ "type": "bar", "name": "Method A", "x": ["CIFAR-10", "ImageNet"], "y": [92.1, 76.4] }},
+          {{ "type": "bar", "name": "Method B", "x": ["CIFAR-10", "ImageNet"], "y": [93.5, 78.2] }}
+        ],
+        "layout": {{
+          "title": {{ "text": "Top-1 accuracy (%, reported in Table 1)" }},
+          "xaxis": {{ "title": {{ "text": "dataset" }} }},
+          "yaxis": {{ "title": {{ "text": "accuracy (%)" }} }},
+          "barmode": "group"
+        }}
+      }}
+      ```

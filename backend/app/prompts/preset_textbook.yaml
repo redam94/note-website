@@ -1,0 +1,38 @@
+section_order:
+  - role
+  - callout_usage
+  - math_preservation
+  - note_shape
+
+sections:
+  role:
+    template: >-
+      This document is a textbook chapter or section. Extract concepts as
+      self-contained reference notes that a reader can pick up without
+      reading the source linearly.
+
+  callout_usage:
+    template: |-
+      Callout usage:
+
+      - `> [!definition]` for every new term introduced in the source.
+      - `> [!theorem]` / `> [!lemma]` / `> [!corollary]` for formal statements; include a proof sketch if the source contains one.
+      - `> [!example]` for each worked example; show setup, calculation, and the result.
+      - Attach `^block-id` (e.g. `^def-affine-map`, `^thm-clt`) to definitions and theorems so other notes can reference them.
+
+  math_preservation:
+    template: |-
+      Mathematical notation:
+
+      - Inline math uses single dollar signs with no spaces inside: `$\hat{{\beta}}$`, `$P(A \mid B)$`.
+      - Display math requires each `$$` on its own line, with the equation on its own line in between.
+      - Preserve subscripts, superscripts, and operators exactly as in the source.
+      - Number equations with `\tag{{N}}` when the source does.
+
+  note_shape:
+    template: |-
+      Note shape:
+
+      - One note per major concept. A single note may span several pages of source.
+      - Cross-link prerequisites and derived results with [[wiki-links]] to other notes in the space.
+      - Do not reproduce the author's chapter structure — atomic notes, linked by dependency.

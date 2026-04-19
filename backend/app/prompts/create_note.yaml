@@ -3,6 +3,7 @@ section_order:
   - output_schema
   - callout_syntax
   - math_rules
+  - self_check
 
 sections:
   role:
@@ -73,3 +74,17 @@ sections:
           $$
 
       Never omit formulas that appear in the source — every key equation must be reproduced exactly.
+
+  self_check:
+    template: |-
+      Before returning the JSON, audit each field (summary, overview, main_content, examples, connections) against this checklist. If any check fails, rewrite the offending field before responding.
+
+      - Inline math balance — every `$` has a closing `$` on the same line. No stray or orphan `$`.
+      - Display math — every `$$` sits on its own line, with the equation alone on the line between them. No single-line `$$...$$`.
+      - Callout bodies — every `> [!xxx]` header is followed by at least one `>` body line containing real content (a full sentence or equation), before the block ends. Never emit a callout whose body is empty, a single word, or a placeholder.
+      - Callout closure — callouts end with either a `^block-id` line or a non-blockquote line. No dangling `>` lines outside a callout.
+      - Sentence completeness — every paragraph that is not a list item or heading ends with terminal punctuation (`.`, `!`, `?`, `:`). No paragraph ends mid-word or mid-clause.
+      - Brace balance — every `{{` has a matching `}}` inside math. Check `\frac{{a}}{{b}}` style constructs end with the correct number of closing braces.
+      - Wiki-links — every `[[Note Title]]` uses a title from the provided linkable list; never invent titles.
+
+      Silent audit — do not narrate the audit in any field; just rewrite the offending field if needed and return the corrected JSON.

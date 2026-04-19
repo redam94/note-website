@@ -14,6 +14,7 @@ from ...models.note import Note
 from ...prompts import load_prompt
 from ...schemas.note_output import NoteOutput, _fix_json_latex_escapes
 from ...services.model_provider import get_provider, get_setting
+from ..note_quality import first_lint_issue
 from ..progress import set_step
 from ..state import ProcessingState
 
@@ -321,7 +322,7 @@ def _build_frontmatter(
 
 
 def _stub_reason(note: NoteOutput) -> str | None:
-    """Return why this note is a stub, or None if it passes quality."""
+    """Return why this note is a stub or has quality issues, or None if it passes."""
     content = note.assemble_markdown()
     if len(content) < _MIN_QUALITY_CHARS:
         return f"total content too short ({len(content)}/{_MIN_QUALITY_CHARS} chars)"
@@ -329,6 +330,9 @@ def _stub_reason(note: NoteOutput) -> str | None:
         return f"main_content too short ({len(note.main_content)}/200 chars)"
     if "Content extracted from" in content and content.count("##") <= 2:
         return "boilerplate extraction placeholder"
+    lint = first_lint_issue(content)
+    if lint:
+        return lint
     return None
 
 
@@ -352,6 +356,31 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
         model = await get_setting(db, "model_create")
         result = await db.execute(select(Note.slug))
         existing_slugs = set(result.scalars().all())
+        # Existing notes for THIS document — used to skip re-creation on
+        # resume from checkpoint or redundant invocations.
+        existing_for_doc_result = await db.execute(
+            select(Note.title).where(Note.document_id == document_id)
+        )
+        existing_titles_for_doc = set(existing_for_doc_result.scalars().all())
+
+    # Defense-in-depth: even with plan-level dedup, refuse to write a second
+    # row with the same title for this document. Catches replays and
+    # plan-level dedup regressions.
+    seen_in_batch: set[str] = set()
+    deduped_plan: list[dict] = []
+    for entry in note_plan:
+        t = (entry.get("title") or "").strip()
+        if not t:
+            continue
+        if t in existing_titles_for_doc:
+            logger.info("Skipping '%s' — already exists for doc %d", t, document_id)
+            continue
+        if t in seen_in_batch:
+            logger.warning("Duplicate title '%s' in note_plan — skipping", t)
+            continue
+        seen_in_batch.add(t)
+        deduped_plan.append(entry)
+    note_plan = deduped_plan
 
     title_list = [p["title"] for p in note_plan]
     existing_titles = state.get("existing_note_titles", [])
@@ -468,9 +497,11 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
                 escalation_prompt = base_prompt.replace(section_text, expanded_text)
                 if prior_draft:
                     escalation_prompt += (
-                        f"\n\nA previous attempt produced this insufficient draft "
-                        f"(too brief or missing sections). Rewrite with much more detail, "
-                        f"specific formulas, examples, and explanations:\n\n{prior_draft[:2000]}"
+                        f"\n\nThe previous attempt was rejected: {prior_reason}.\n"
+                        f"Rewrite with a corrected version — balance all $ and $$ delimiters, "
+                        f"give every callout a full body, complete any truncated sentences, "
+                        f"and add more detail, specific formulas, and examples:\n\n"
+                        f"{prior_draft[:2000]}"
                     )
 
                 try:

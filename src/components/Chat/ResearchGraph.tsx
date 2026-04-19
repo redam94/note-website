@@ -101,7 +101,7 @@ export default function ResearchGraph({
   // Fetch the full knowledge graph once per space
   useEffect(() => {
     setFullGraph(null);
-    fetch(apiUrl("/api/graph", spaceSlug))
+    fetch(apiUrl("/api/graph", spaceSlug, { include_topics: "true" }))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (data) setFullGraph(data); })
       .catch(() => {});

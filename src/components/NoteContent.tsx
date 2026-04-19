@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import PlotlyChart from "./PlotlyChart";
 
 // ── Callout metadata ────────────────────────────────────────────────
 
@@ -122,6 +123,20 @@ function slugify(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
+function extractPlotlySource(children: React.ReactNode): string | null {
+  // react-markdown renders ```plotly as <pre><code class="language-plotly">…</code></pre>.
+  // Find the <code> element among the children and check its className.
+  const arr = Array.isArray(children) ? children : [children];
+  for (const child of arr) {
+    if (!child || typeof child !== "object" || !("props" in child)) continue;
+    const cls: string | undefined = (child as any).props?.className;
+    if (cls && /\blanguage-plotly\b/.test(cls)) {
+      return extractText((child as any).props?.children);
+    }
+  }
+  return null;
+}
+
 const mdComponents = {
   h1: ({ children, ...props }: any) => <h1 id={slugify(extractText(children))} {...props}>{children}</h1>,
   h2: ({ children, ...props }: any) => <h2 id={slugify(extractText(children))} {...props}>{children}</h2>,
@@ -138,6 +153,13 @@ const mdComponents = {
       <table {...props}>{children}</table>
     </div>
   ),
+  pre: ({ children, ...props }: any) => {
+    const plotlySource = extractPlotlySource(children);
+    if (plotlySource !== null) {
+      return <PlotlyChart source={plotlySource} />;
+    }
+    return <pre {...props}>{children}</pre>;
+  },
 };
 
 // ── Component ───────────────────────────────────────────────────────

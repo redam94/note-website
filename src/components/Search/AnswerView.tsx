@@ -8,6 +8,8 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 
 // ── Callout metadata ─────────────────────────────────────────────────
 
@@ -144,6 +146,7 @@ export default function AnswerView({ question, answer, isStreaming, statusMessag
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<{ slug: string } | null>(null);
   const router = useRouter();
+  const { spaceSlug } = useSpace();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Parse blocks from whatever answer text we have so far
@@ -159,7 +162,7 @@ export default function AnswerView({ question, answer, isStreaming, statusMessag
   async function handleSave() {
     setSaving(true);
     try {
-      const res = await fetch("/api/ask/save", {
+      const res = await fetch(apiUrl("/api/ask/save", spaceSlug), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, answer }),

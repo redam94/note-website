@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import * as d3 from "d3";
 import type { GraphData, GraphNode } from "@/types";
 
@@ -29,7 +30,10 @@ const EDGE_COLORS: Record<string, string> = {
   part_of: "#9b8fb5",
   references: "#a0a095",
   cluster_link: "#6b8f9a",
+  topic_of: "#b5a28a",
 };
+
+const TOPIC_STROKE = "#8a7a6a";
 
 // Node colors by note type (from type/* tags)
 const NODE_TYPE_COLORS: Record<string, string> = {
@@ -52,8 +56,13 @@ function getNodeType(tags: string[]): string {
   return "";
 }
 
+function isTopicNode(d: GraphNode): boolean {
+  return d.nodeType === "topic";
+}
+
 function getNodeColor(d: GraphNode): string {
   if (d.nodeType === "subgraph") return "#5a7a8a";
+  if (d.nodeType === "topic") return TOPIC_STROKE;
   const noteType = getNodeType(d.tags || []);
   return NODE_TYPE_COLORS[noteType] || DEFAULT_NODE_COLOR;
 }
@@ -68,6 +77,7 @@ export default function ForceGraph({
   showLegend = true,
 }: ForceGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const router = useRouter();
   const [hoveredNode, setHoveredNode] = useState<number | null>(null);
   // Persist node positions and zoom between data updates
   const nodePositionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -165,6 +175,7 @@ export default function ForceGraph({
     // Node radius helper
     function nodeRadius(d: SimNode): number {
       if (d.nodeType === "subgraph") return Math.max(6, Math.min(14, 6 + d.degree * 0.25));
+      if (isTopicNode(d)) return Math.max(4, Math.min(16, 4 + Math.sqrt(d.degree) * 2.2));
       return Math.max(1.8, Math.min(7, 1.8 + Math.sqrt(d.degree) * 1.4));
     }
 
@@ -207,9 +218,18 @@ export default function ForceGraph({
       .data(nodes, (d) => String(d.id))
       .join("circle")
       .attr("r", (d) => nodeRadius(d))
-      .attr("fill", (d) => getNodeColor(d))
-      .attr("stroke", (d) => d.id === focusNodeId ? "#2c2a1f" : "none")
-      .attr("stroke-width", (d) => d.id === focusNodeId ? 2 : 0)
+      .attr("fill", (d) => (isTopicNode(d) ? "none" : getNodeColor(d)))
+      .attr("stroke", (d) => {
+        if (d.id === focusNodeId) return "#2c2a1f";
+        if (isTopicNode(d)) return getNodeColor(d);
+        return "none";
+      })
+      .attr("stroke-width", (d) => {
+        if (d.id === focusNodeId) return 2;
+        if (isTopicNode(d)) return 1.5;
+        return 0;
+      })
+      .style("pointer-events", "all")
       .style("cursor", "pointer")
       .on("mouseenter", (_event, d) => {
         setHoveredNode(d.id);
@@ -248,7 +268,13 @@ export default function ForceGraph({
         link.attr("stroke-opacity", 0.15).attr("stroke", "#c8c5bc").attr("stroke-width", 0.5);
         label.attr("opacity", 0);
       })
-      .on("click", (_event, d) => onNodeClick?.(d.slug))
+      .on("click", (_event, d) => {
+        if (isTopicNode(d)) {
+          router.push(`/search?q=${encodeURIComponent(d.slug)}`);
+          return;
+        }
+        onNodeClick?.(d.slug);
+      })
       .call(drag as any);
 
     // ── Stop previous simulation and start fresh ──────────────────────
@@ -297,6 +323,13 @@ export default function ForceGraph({
               <span className="text-[var(--text-secondary)]">{type}</span>
             </div>
           ))}
+          <div className="flex items-center gap-2 pt-1 mt-1 border-t border-[var(--border)]">
+            <span
+              className="inline-block w-2.5 h-2.5 rounded-full"
+              style={{ backgroundColor: "transparent", border: `1.5px solid ${TOPIC_STROKE}` }}
+            />
+            <span className="text-[var(--text-secondary)]">topic</span>
+          </div>
         </div>
       )}
     </div>
