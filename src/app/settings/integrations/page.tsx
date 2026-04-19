@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import { useAuth } from "@/components/AuthProvider";
@@ -115,6 +116,12 @@ function IntegrationsBody() {
                     ) : null}
                   </div>
                 </div>
+                <Link
+                  href={`/settings/integrations/${acc.id}`}
+                  className="px-3 py-1.5 text-[13px] bg-[var(--surface2)] text-[var(--text)] rounded border border-[var(--border)] hover:bg-[var(--border)] transition-colors"
+                >
+                  Manage repos
+                </Link>
                 <button onClick={() => handleDisconnect(acc.id)} className={btnDanger}>
                   Disconnect
                 </button>

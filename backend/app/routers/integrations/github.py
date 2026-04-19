@@ -31,8 +31,11 @@ from ...integrations.github.auth import (
     GitHubNotConfigured,
     fetch_installation_metadata,
     invalidate_cache,
+    list_installation_repos,
 )
 from ...models.connected_account import ConnectedAccount
+from ...models.integration_resource import IntegrationResource
+from ...models.space import Space
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,39 @@ class ConnectedAccountOut(BaseModel):
     metadata: dict
 
 
+class RepoOut(BaseModel):
+    external_id: str
+    full_name: str
+    owner: str
+    name: str
+    default_branch: str | None
+    private: bool
+    # Tracking state (null if not tracked)
+    resource_id: int | None
+    enabled: bool
+    space_id: int | None
+    issues_enabled: bool
+    prs_enabled: bool
+    wiki_enabled: bool
+    last_synced_at: str | None
+
+
+class RepoSelection(BaseModel):
+    external_id: str
+    full_name: str
+    default_branch: str | None = None
+    private: bool = False
+    enabled: bool = True
+    space_id: int | None = None
+    issues_enabled: bool = True
+    prs_enabled: bool = True
+    wiki_enabled: bool = False
+
+
+class RepoBulkUpsert(BaseModel):
+    repos: list[RepoSelection]
+
+
 # ── Endpoints ────────────────────────────────────────────────────────
 
 
@@ -107,7 +143,7 @@ async def github_install():
     return RedirectResponse(url=url, status_code=302)
 
 
-@router.get("/callback")
+@router.get("/callback", dependencies=[Depends(require_admin)])
 async def github_callback(
     installation_id: int | None = Query(default=None),
     setup_action: str | None = Query(default=None),
@@ -116,10 +152,8 @@ async def github_callback(
 ):
     """Handle the post-install redirect from GitHub.
 
-    Note: this endpoint is NOT gated by require_admin because GitHub redirects
-    the user's browser here without our cookies in some setups. Security rests
-    on the signed `state` token we issued from the (admin-gated) /install
-    endpoint — an attacker cannot forge a valid state.
+    Two gates: admin session cookie (so an intercepted state can't be replayed
+    from a different browser) AND signed state (standard CSRF protection).
     """
     _require_configured()
     if not state:
@@ -201,6 +235,206 @@ async def list_github_accounts(
         )
         for r in rows
     ]
+
+
+async def _load_account(db: AsyncSession, account_id: int) -> ConnectedAccount:
+    result = await db.execute(
+        select(ConnectedAccount).where(
+            ConnectedAccount.id == account_id,
+            ConnectedAccount.integration_type == "github",
+        )
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return row
+
+
+def _installation_id_for(acct: ConnectedAccount) -> int:
+    try:
+        md = json.loads(acct.metadata_json or "{}")
+    except ValueError:
+        md = {}
+    inst_id = md.get("installation_id")
+    if not inst_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Account has no installation_id — reconnect it.",
+        )
+    return int(inst_id)
+
+
+@router.get("/accounts/{account_id}/repos", dependencies=[Depends(require_admin)])
+async def list_account_repos(
+    account_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> list[RepoOut]:
+    """Merge the live GitHub repo list with any integration_resources rows
+    so the UI can render the enable-state for each one."""
+    _require_configured()
+    acct = await _load_account(db, account_id)
+    installation_id = _installation_id_for(acct)
+
+    try:
+        repos = await list_installation_repos(installation_id)
+    except (GitHubNotConfigured, httpx.HTTPError) as e:
+        logger.exception("Failed to list installation repos")
+        raise HTTPException(status_code=502, detail=f"GitHub API error: {e}") from e
+
+    # Fetch existing tracking rows for this account/resource_type
+    tracked_result = await db.execute(
+        select(IntegrationResource).where(
+            IntegrationResource.account_id == account_id,
+            IntegrationResource.resource_type == "repo",
+        )
+    )
+    by_ext_id = {r.external_id: r for r in tracked_result.scalars().all()}
+
+    out: list[RepoOut] = []
+    for r in repos:
+        ext_id = str(r["id"])
+        tracked = by_ext_id.get(ext_id)
+        cfg: dict = {}
+        if tracked and tracked.config_json:
+            try:
+                cfg = json.loads(tracked.config_json)
+            except ValueError:
+                cfg = {}
+        owner_obj = r.get("owner") or {}
+        out.append(
+            RepoOut(
+                external_id=ext_id,
+                full_name=r.get("full_name", ""),
+                owner=owner_obj.get("login", ""),
+                name=r.get("name", ""),
+                default_branch=r.get("default_branch"),
+                private=bool(r.get("private", False)),
+                resource_id=tracked.id if tracked else None,
+                enabled=bool(tracked.enabled) if tracked else False,
+                space_id=tracked.space_id if tracked else None,
+                issues_enabled=bool(cfg.get("issues_enabled", False)),
+                prs_enabled=bool(cfg.get("prs_enabled", False)),
+                wiki_enabled=bool(cfg.get("wiki_enabled", False)),
+                last_synced_at=tracked.last_synced_at if tracked else None,
+            )
+        )
+    return out
+
+
+@router.post("/accounts/{account_id}/resources", dependencies=[Depends(require_admin)])
+async def upsert_account_resources(
+    account_id: int,
+    body: RepoBulkUpsert,
+    db: AsyncSession = Depends(get_db),
+) -> list[RepoOut]:
+    """Bulk upsert repo tracking state. Rows absent from the payload are left alone."""
+    acct = await _load_account(db, account_id)
+
+    # Pre-validate every referenced space
+    space_ids = {s.space_id for s in body.repos if s.space_id is not None}
+    if space_ids:
+        result = await db.execute(select(Space.id).where(Space.id.in_(space_ids)))
+        valid_ids = {row[0] for row in result.all()}
+        missing = space_ids - valid_ids
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown space_id(s): {sorted(missing)}",
+            )
+
+    existing_result = await db.execute(
+        select(IntegrationResource).where(
+            IntegrationResource.account_id == account_id,
+            IntegrationResource.resource_type == "repo",
+        )
+    )
+    existing = {r.external_id: r for r in existing_result.scalars().all()}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    touched: list[IntegrationResource] = []
+
+    for sel in body.repos:
+        cfg = {
+            "issues_enabled": bool(sel.issues_enabled),
+            "prs_enabled": bool(sel.prs_enabled),
+            "wiki_enabled": bool(sel.wiki_enabled),
+            "default_branch": sel.default_branch,
+            "private": bool(sel.private),
+        }
+        row = existing.get(sel.external_id)
+        if row is None:
+            row = IntegrationResource(
+                account_id=account_id,
+                resource_type="repo",
+                external_id=sel.external_id,
+                name=sel.full_name,
+                enabled=1 if sel.enabled else 0,
+                config_json=json.dumps(cfg),
+                space_id=sel.space_id,
+                created_at=now_iso,
+            )
+            db.add(row)
+        else:
+            row.name = sel.full_name or row.name
+            row.enabled = 1 if sel.enabled else 0
+            row.config_json = json.dumps(cfg)
+            row.space_id = sel.space_id
+        touched.append(row)
+
+    await db.commit()
+
+    # Re-read with ids populated and return in the same shape as the GET endpoint
+    acct_id = acct.id
+    refreshed = await db.execute(
+        select(IntegrationResource).where(
+            IntegrationResource.account_id == acct_id,
+            IntegrationResource.resource_type == "repo",
+        )
+    )
+    rows = refreshed.scalars().all()
+    out: list[RepoOut] = []
+    for r in rows:
+        cfg = {}
+        if r.config_json:
+            try:
+                cfg = json.loads(r.config_json)
+            except ValueError:
+                cfg = {}
+        owner, _, name = (r.name or "").partition("/")
+        out.append(
+            RepoOut(
+                external_id=r.external_id,
+                full_name=r.name,
+                owner=owner,
+                name=name,
+                default_branch=cfg.get("default_branch"),
+                private=bool(cfg.get("private", False)),
+                resource_id=r.id,
+                enabled=bool(r.enabled),
+                space_id=r.space_id,
+                issues_enabled=bool(cfg.get("issues_enabled", False)),
+                prs_enabled=bool(cfg.get("prs_enabled", False)),
+                wiki_enabled=bool(cfg.get("wiki_enabled", False)),
+                last_synced_at=r.last_synced_at,
+            )
+        )
+    return out
+
+
+@router.delete("/resources/{resource_id}", dependencies=[Depends(require_admin)])
+async def delete_resource(
+    resource_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(
+        select(IntegrationResource).where(IntegrationResource.id == resource_id)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Resource not found")
+    await db.delete(row)
+    await db.commit()
+    return {"deleted": resource_id}
 
 
 @router.delete("/accounts/{account_id}", dependencies=[Depends(require_admin)])

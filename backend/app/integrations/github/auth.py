@@ -111,3 +111,35 @@ def invalidate_cache(installation_id: int | None = None) -> None:
         _install_token_cache.clear()
     else:
         _install_token_cache.pop(installation_id, None)
+
+
+async def list_installation_repos(installation_id: int) -> list[dict]:
+    """Return all repos this installation can reach.
+
+    Pages through GET /installation/repositories (max 100/page; stops when the
+    server returns fewer than the page size).
+    """
+    token = await get_installation_token(installation_id)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    per_page = 100
+    repos: list[dict] = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        page = 1
+        while True:
+            resp = await client.get(
+                "https://api.github.com/installation/repositories",
+                headers=headers,
+                params={"per_page": per_page, "page": page},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data.get("repositories", [])
+            repos.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+    return repos
