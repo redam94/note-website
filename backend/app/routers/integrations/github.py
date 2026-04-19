@@ -33,6 +33,7 @@ from ...integrations.github.auth import (
     invalidate_cache,
     list_installation_repos,
 )
+from ...integrations.github.sync import sync_repo
 from ...models.connected_account import ConnectedAccount
 from ...models.integration_resource import IntegrationResource
 from ...models.space import Space
@@ -419,6 +420,32 @@ async def upsert_account_resources(
             )
         )
     return out
+
+
+@router.post("/resources/{resource_id}/sync", dependencies=[Depends(require_admin)])
+async def sync_resource(
+    resource_id: int,
+    dry_run: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Run incremental sync for a tracked repo. Admin-only.
+
+    With `dry_run=true`, returns the count of items that *would* be ingested
+    without writing to the DB — useful for previewing before the first sync.
+    """
+    _require_configured()
+    result = await db.execute(
+        select(IntegrationResource).where(IntegrationResource.id == resource_id)
+    )
+    resource = result.scalar_one_or_none()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+    acct = await _load_account(db, resource.account_id)
+    installation_id = _installation_id_for(acct)
+
+    sync_result = await sync_repo(db, resource, installation_id, dry_run=dry_run)
+    return sync_result.as_dict()
 
 
 @router.delete("/resources/{resource_id}", dependencies=[Depends(require_admin)])

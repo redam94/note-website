@@ -19,9 +19,9 @@ RUN npm run build
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Install Node.js + curl
+# Install Node.js + curl + git (git needed for GitHub wiki sync)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl \
+    build-essential curl git \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*

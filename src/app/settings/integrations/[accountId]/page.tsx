@@ -42,6 +42,8 @@ export default function AccountReposPage({
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [filter, setFilter] = useState("");
+  const [syncingId, setSyncingId] = useState<number | null>(null);
+  const [syncResults, setSyncResults] = useState<Record<number, string>>({});
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -123,6 +125,49 @@ export default function AccountReposPage({
     }
   };
 
+  const handleSync = async (resourceId: number) => {
+    setSyncingId(resourceId);
+    setSyncResults((prev) => ({ ...prev, [resourceId]: "Syncing…" }));
+    try {
+      const res = await fetch(
+        `/api/integrations/github/resources/${resourceId}/sync`,
+        { method: "POST" },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setSyncResults((prev) => ({
+          ...prev,
+          [resourceId]: `Error: ${data.detail || res.status}`,
+        }));
+        return;
+      }
+      const parts: string[] = [];
+      if (data.issues_ingested || data.issues_updated) {
+        parts.push(
+          `${data.issues_ingested} new / ${data.issues_updated} updated issues`,
+        );
+      }
+      if (data.prs_ingested || data.prs_updated) {
+        parts.push(`${data.prs_ingested} new / ${data.prs_updated} updated PRs`);
+      }
+      if (data.errors?.length) {
+        parts.push(`${data.errors.length} error(s)`);
+      }
+      setSyncResults((prev) => ({
+        ...prev,
+        [resourceId]: parts.length ? parts.join(" · ") : "No changes",
+      }));
+      await refresh();
+    } catch (e) {
+      setSyncResults((prev) => ({
+        ...prev,
+        [resourceId]: `Error: ${String(e)}`,
+      }));
+    } finally {
+      setSyncingId(null);
+    }
+  };
+
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return repos;
@@ -198,6 +243,7 @@ export default function AccountReposPage({
                 <th className="px-3 py-2 text-center font-medium">Issues</th>
                 <th className="px-3 py-2 text-center font-medium">PRs</th>
                 <th className="px-3 py-2 text-center font-medium">Wiki</th>
+                <th className="px-3 py-2 text-left font-medium">Sync</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border)]">
@@ -247,6 +293,31 @@ export default function AccountReposPage({
                       />
                     </td>
                   ))}
+                  <td className="px-3 py-2">
+                    {r.resource_id === null ? (
+                      <span className="text-[11px] text-[var(--muted)]">Save first</span>
+                    ) : (
+                      <div className="flex flex-col gap-1">
+                        <button
+                          onClick={() => handleSync(r.resource_id!)}
+                          disabled={
+                            syncingId === r.resource_id ||
+                            !r.enabled ||
+                            r.space_id === null ||
+                            (!r.issues_enabled && !r.prs_enabled)
+                          }
+                          className="px-2 py-1 text-[12px] bg-[var(--surface2)] text-[var(--text)] rounded border border-[var(--border)] hover:bg-[var(--border)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {syncingId === r.resource_id ? "Syncing…" : "Sync"}
+                        </button>
+                        {syncResults[r.resource_id] && (
+                          <span className="text-[11px] text-[var(--text-secondary)]">
+                            {syncResults[r.resource_id]}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
