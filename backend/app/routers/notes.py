@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import AuthUser, get_current_user, require_admin
+from ..auth import AuthUser, get_current_user, note_visibility_filter, require_admin
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.document import Document
@@ -28,8 +28,19 @@ router = APIRouter(prefix="/api")
 
 
 @router.get("/notes/{slug}")
-async def get_note(slug: str, db: AsyncSession = Depends(get_db), current_space: Space = Depends(get_current_space)) -> NoteWithLinks:
-    result = await db.execute(select(Note).where(Note.slug == slug).where(Note.space_id == current_space.id))
+async def get_note(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
+) -> NoteWithLinks:
+    vis = note_visibility_filter(user.is_admin)
+    result = await db.execute(
+        select(Note)
+        .where(Note.slug == slug)
+        .where(Note.space_id == current_space.id)
+        .where(vis)
+    )
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -42,8 +53,11 @@ async def get_note(slug: str, db: AsyncSession = Depends(get_db), current_space:
     )
     edges = edges_result.scalars().all()
 
-    # Get all notes for resolving links
-    all_notes_result = await db.execute(select(Note).where(Note.space_id == current_space.id))
+    # Get all notes for resolving links (visibility-filtered so readers never
+    # see backlinks/outlinks that reference admin-only notes)
+    all_notes_result = await db.execute(
+        select(Note).where(Note.space_id == current_space.id).where(vis)
+    )
     all_notes = all_notes_result.scalars().all()
     note_map = {n.id: n for n in all_notes}
 
@@ -258,6 +272,32 @@ async def create_note(
 
 class NoteMove(BaseModel):
     parent_id: int | None  # None = move to root
+
+
+class NoteVisibilityUpdate(BaseModel):
+    visibility: str  # "public" | "admin"
+
+
+@router.patch("/notes/{slug}/visibility", dependencies=[Depends(require_admin)])
+async def update_note_visibility(
+    slug: str,
+    body: NoteVisibilityUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+):
+    if body.visibility not in ("public", "admin"):
+        raise HTTPException(status_code=400, detail="visibility must be 'public' or 'admin'")
+
+    result = await db.execute(
+        select(Note).where(Note.slug == slug, Note.space_id == current_space.id)
+    )
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    note.visibility = body.visibility
+    await db.commit()
+    return {"slug": note.slug, "visibility": note.visibility}
 
 
 @router.patch("/notes/{slug}/parent", dependencies=[Depends(require_admin)])

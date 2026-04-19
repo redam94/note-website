@@ -25,6 +25,7 @@ class NoteWithLinks(BaseModel):
     chapter: str | None = None
     page: int | None = None
     summary: str | None = None
+    visibility: str = "public"
     backlinks: list[LinkInfo]
     outlinks: list[LinkInfo]
 
@@ -45,6 +46,7 @@ class NoteWithLinks(BaseModel):
             chapter=getattr(row, "chapter", None),
             page=getattr(row, "page", None),
             summary=getattr(row, "summary", None),
+            visibility=getattr(row, "visibility", "public"),
             backlinks=backlinks,
             outlinks=outlinks,
         )

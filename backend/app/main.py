@@ -9,6 +9,7 @@ from sqlalchemy import text
 from .config import settings
 from .database import engine
 from .routers import ask, auth, chat, community, documents, extraction_profiles, graph, graph_tools, link, maintenance, notes, search, settings as settings_router, spaces
+from .routers.integrations import github as integrations_github
 
 logger = logging.getLogger(__name__)
 
@@ -62,3 +63,4 @@ app.include_router(maintenance.router)
 app.include_router(community.router)
 app.include_router(spaces.router)
 app.include_router(extraction_profiles.router)
+app.include_router(integrations_github.router)

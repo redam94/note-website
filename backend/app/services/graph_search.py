@@ -12,12 +12,20 @@ import re
 from collections import deque
 from typing import Literal
 
+import sqlalchemy as sa
 from sqlalchemy import or_, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
 from ..models.subgraph_node import SubgraphNode
+
+
+def _vis(is_admin: bool):
+    """Visibility filter for reader-reachable queries. Admin → no-op; others → public only."""
+    if is_admin:
+        return sa.true()
+    return Note.visibility == "public"
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +74,7 @@ async def get_neighbors(
     note_id: int,
     direction: Literal["out", "in", "both"] = "both",
     relationship: str | None = None,
+    is_admin: bool = True,
 ) -> dict:
     """Return immediate neighbours of a note.
 
@@ -73,11 +82,13 @@ async def get_neighbors(
         note_id: The note to start from.
         direction: "out" (outlinks), "in" (backlinks), or "both".
         relationship: Optional filter for relationship type.
+        is_admin: When False, hides notes with visibility='admin'.
 
     Returns:
         {"note": {...}, "neighbors": [...], "edges": [...]}
     """
-    result = await db.execute(select(Note).where(Note.id == note_id))
+    vis = _vis(is_admin)
+    result = await db.execute(select(Note).where(Note.id == note_id).where(vis))
     note = result.scalar_one_or_none()
     if not note:
         return {"error": f"Note {note_id} not found"}
@@ -102,18 +113,18 @@ async def get_neighbors(
         if e.target_id != note_id:
             neighbor_ids.add(e.target_id)
 
-    # Include parent/children
+    # Include parent/children (visibility-filtered)
     if note.parent_id and direction in ("in", "both"):
         neighbor_ids.add(note.parent_id)
     children_result = await db.execute(
-        select(Note).where(Note.parent_id == note_id)
+        select(Note).where(Note.parent_id == note_id).where(vis)
     )
     if direction in ("out", "both"):
         for child in children_result.scalars().all():
             neighbor_ids.add(child.id)
 
     notes_result = await db.execute(
-        select(Note).where(Note.id.in_(neighbor_ids))
+        select(Note).where(Note.id.in_(neighbor_ids)).where(vis)
     )
     neighbors = [_note_summary(n) for n in notes_result.scalars().all()]
 
@@ -134,11 +145,13 @@ async def bfs_traverse(
     max_depth: int = 2,
     max_nodes: int = 50,
     relationship: str | None = None,
+    is_admin: bool = True,
 ) -> dict:
     """Breadth-first traversal from a starting note.
 
     Returns all reachable notes within `max_depth` hops.
     """
+    vis = _vis(is_admin)
     visited: dict[int, int] = {}  # note_id -> depth
     queue: deque[tuple[int, int]] = deque([(start_id, 0)])
 
@@ -164,18 +177,21 @@ async def bfs_traverse(
                 queue.append((next_id, depth + 1))
 
         # Parent/children
-        note_result = await db.execute(select(Note).where(Note.id == nid))
+        note_result = await db.execute(select(Note).where(Note.id == nid).where(vis))
         note = note_result.scalar_one_or_none()
         if note and note.parent_id and note.parent_id not in visited:
             queue.append((note.parent_id, depth + 1))
-        children = await db.execute(select(Note.id).where(Note.parent_id == nid))
+        children = await db.execute(
+            select(Note.id).where(Note.parent_id == nid).where(vis)
+        )
         for (cid,) in children.all():
             if cid not in visited:
                 queue.append((cid, depth + 1))
 
-    # Fetch full note summaries
+    # Fetch full note summaries (visibility-filtered drops any hidden nodes
+    # that leaked in via edges pointing at them)
     notes_result = await db.execute(
-        select(Note).where(Note.id.in_(visited.keys()))
+        select(Note).where(Note.id.in_(visited.keys())).where(vis)
     )
     nodes = []
     for n in notes_result.scalars().all():
@@ -197,8 +213,16 @@ async def find_path(
     from_id: int,
     to_id: int,
     max_depth: int = 6,
+    is_admin: bool = True,
 ) -> dict:
     """BFS shortest path between two notes through the graph."""
+    vis = _vis(is_admin)
+    # If either endpoint is hidden to this caller, treat the path as not found.
+    endpoints_check = await db.execute(
+        select(Note.id).where(Note.id.in_([from_id, to_id])).where(vis)
+    )
+    if len({r[0] for r in endpoints_check.all()}) < 2:
+        return {"found": False, "path": [], "length": -1}
     parent_map: dict[int, int | None] = {from_id: None}
     queue: deque[tuple[int, int]] = deque([(from_id, 0)])
 
@@ -214,10 +238,13 @@ async def find_path(
             path_ids.reverse()
 
             notes_result = await db.execute(
-                select(Note).where(Note.id.in_(path_ids))
+                select(Note).where(Note.id.in_(path_ids)).where(vis)
             )
             note_map = {n.id: _note_summary(n) for n in notes_result.scalars().all()}
-            path = [note_map[pid] for pid in path_ids if pid in note_map]
+            # If any hop on the path is hidden to the caller, the path is not traversable
+            if any(pid not in note_map for pid in path_ids):
+                return {"found": False, "path": [], "length": -1}
+            path = [note_map[pid] for pid in path_ids]
             return {"found": True, "path": path, "length": len(path) - 1}
 
         if depth >= max_depth:
@@ -235,12 +262,14 @@ async def find_path(
                 queue.append((next_id, depth + 1))
 
         # Parent/children edges
-        note_result = await db.execute(select(Note).where(Note.id == nid))
+        note_result = await db.execute(select(Note).where(Note.id == nid).where(vis))
         note = note_result.scalar_one_or_none()
         if note and note.parent_id and note.parent_id not in parent_map:
             parent_map[note.parent_id] = nid
             queue.append((note.parent_id, depth + 1))
-        children = await db.execute(select(Note.id).where(Note.parent_id == nid))
+        children = await db.execute(
+            select(Note.id).where(Note.parent_id == nid).where(vis)
+        )
         for (cid,) in children.all():
             if cid not in parent_map:
                 parent_map[cid] = nid
@@ -258,10 +287,11 @@ async def find_by_tag(
     tag: str,
     limit: int = 30,
     space_id: int | None = None,
+    is_admin: bool = True,
 ) -> list[dict]:
     """Find notes whose tags JSON array contains the given tag."""
     pattern = f'%"{tag}"%'
-    query = select(Note).where(Note.tags.like(pattern))
+    query = select(Note).where(Note.tags.like(pattern)).where(_vis(is_admin))
     if space_id is not None:
         query = query.where(Note.space_id == space_id)
     result = await db.execute(query.limit(limit))
@@ -278,6 +308,7 @@ async def grep_notes(
     case_sensitive: bool = False,
     limit: int = 20,
     space_id: int | None = None,
+    is_admin: bool = True,
 ) -> list[dict]:
     """Search note content and titles for a text pattern.
 
@@ -292,6 +323,7 @@ async def grep_notes(
         query = select(Note).where(
             or_(Note.title.like(like_pat), Note.content.like(like_pat))
         )
+    query = query.where(_vis(is_admin))
     if space_id is not None:
         query = query.where(Note.space_id == space_id)
     query = query.limit(limit)
@@ -335,6 +367,7 @@ async def regex_search(
     regex: str,
     limit: int = 20,
     space_id: int | None = None,
+    is_admin: bool = True,
 ) -> list[dict]:
     """Search note content using a Python regex pattern.
 
@@ -343,10 +376,10 @@ async def regex_search(
     try:
         compiled = re.compile(regex, re.IGNORECASE)
     except re.error:
-        return await grep_notes(db, regex, limit=limit, space_id=space_id)
+        return await grep_notes(db, regex, limit=limit, space_id=space_id, is_admin=is_admin)
 
     # Load all notes (for regex we need Python-side matching)
-    query = select(Note)
+    query = select(Note).where(_vis(is_admin))
     if space_id is not None:
         query = query.where(Note.space_id == space_id)
     result = await db.execute(query)
@@ -374,22 +407,25 @@ async def regex_search(
 async def get_note_context(
     db: AsyncSession,
     note_id: int,
+    is_admin: bool = True,
 ) -> dict:
     """Get comprehensive context around a note for agent use.
 
     Returns the note itself, its parent chain, children, siblings,
     and all directly connected notes with their relationship types.
     """
-    result = await db.execute(select(Note).where(Note.id == note_id))
+    vis = _vis(is_admin)
+    result = await db.execute(select(Note).where(Note.id == note_id).where(vis))
     note = result.scalar_one_or_none()
     if not note:
         return {"error": f"Note {note_id} not found"}
 
-    # Parent chain (walk up)
+    # Parent chain (walk up) — stop at first hidden ancestor so the chain
+    # doesn't leak admin-only parent titles to readers.
     parent_chain = []
     pid = note.parent_id
     while pid:
-        p_result = await db.execute(select(Note).where(Note.id == pid))
+        p_result = await db.execute(select(Note).where(Note.id == pid).where(vis))
         parent = p_result.scalar_one_or_none()
         if not parent:
             break
@@ -398,7 +434,7 @@ async def get_note_context(
 
     # Children
     children_result = await db.execute(
-        select(Note).where(Note.parent_id == note_id)
+        select(Note).where(Note.parent_id == note_id).where(vis)
     )
     children = [_note_summary(c) for c in children_result.scalars().all()]
 
@@ -408,11 +444,12 @@ async def get_note_context(
         sib_result = await db.execute(
             select(Note).where(
                 and_(Note.parent_id == note.parent_id, Note.id != note_id)
-            )
+            ).where(vis)
         )
         siblings = [_note_summary(s) for s in sib_result.scalars().all()]
 
-    # Connected via edges
+    # Connected via edges (filter connected notes through visibility; drop
+    # any edge whose other endpoint is hidden)
     edges_result = await db.execute(
         select(GraphEdge).where(
             or_(GraphEdge.source_id == note_id, GraphEdge.target_id == note_id)
@@ -420,15 +457,19 @@ async def get_note_context(
     )
     edges = edges_result.scalars().all()
     connected_ids = set()
-    edge_list = []
     for e in edges:
         connected_ids.add(e.source_id if e.source_id != note_id else e.target_id)
-        edge_list.append(_edge_dict(e))
 
     connected_result = await db.execute(
-        select(Note).where(Note.id.in_(connected_ids))
+        select(Note).where(Note.id.in_(connected_ids)).where(vis)
     )
-    connected = [_note_summary(n) for n in connected_result.scalars().all()]
+    connected_notes = {n.id: _note_summary(n) for n in connected_result.scalars().all()}
+    connected = list(connected_notes.values())
+    edge_list = [
+        _edge_dict(e)
+        for e in edges
+        if (e.source_id if e.source_id != note_id else e.target_id) in connected_notes
+    ]
 
     return {
         "note": {**_note_summary(note), "content": note.content},
@@ -444,9 +485,13 @@ async def get_note_context(
 # 8.  List all tags in the knowledge base
 # ---------------------------------------------------------------------------
 
-async def list_all_tags(db: AsyncSession, space_id: int | None = None) -> list[dict]:
+async def list_all_tags(
+    db: AsyncSession,
+    space_id: int | None = None,
+    is_admin: bool = True,
+) -> list[dict]:
     """Return all unique tags with their usage count."""
-    query = select(Note.tags)
+    query = select(Note.tags).where(_vis(is_admin))
     if space_id is not None:
         query = query.where(Note.space_id == space_id)
     result = await db.execute(query)
@@ -470,12 +515,14 @@ async def find_related(
     note_id: int,
     limit: int = 10,
     space_id: int | None = None,
+    is_admin: bool = True,
 ) -> list[dict]:
     """Find notes related to a given note by shared tags and graph proximity.
 
     Scores notes by: direct edge (3pts) + shared tag (1pt each) + 2-hop edge (1pt).
     """
-    result = await db.execute(select(Note).where(Note.id == note_id))
+    vis = _vis(is_admin)
+    result = await db.execute(select(Note).where(Note.id == note_id).where(vis))
     note = result.scalar_one_or_none()
     if not note:
         return []
@@ -509,7 +556,7 @@ async def find_related(
 
     # Shared tags: 1 point per shared tag
     if note_tags:
-        tag_query = select(Note).where(Note.id != note_id)
+        tag_query = select(Note).where(Note.id != note_id).where(vis)
         if space_id is not None:
             tag_query = tag_query.where(Note.space_id == space_id)
         all_notes = await db.execute(tag_query)
@@ -518,13 +565,13 @@ async def find_related(
             if shared:
                 scores[n.id] = scores.get(n.id, 0) + len(shared)
 
-    # Fetch top results
+    # Fetch top results (visibility-filtered so edge-derived scores for hidden notes are dropped)
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
     if not ranked:
         return []
 
     ids = [r[0] for r in ranked]
-    notes_result = await db.execute(select(Note).where(Note.id.in_(ids)))
+    notes_result = await db.execute(select(Note).where(Note.id.in_(ids)).where(vis))
     note_map = {n.id: n for n in notes_result.scalars().all()}
 
     results = []
@@ -544,9 +591,11 @@ async def find_related(
 async def get_cluster_context(
     db: AsyncSession,
     note_id: int,
+    is_admin: bool = True,
 ) -> dict | None:
     """Return the cluster a note belongs to, with sibling notes."""
-    result = await db.execute(select(Note).where(Note.id == note_id))
+    vis = _vis(is_admin)
+    result = await db.execute(select(Note).where(Note.id == note_id).where(vis))
     note = result.scalar_one_or_none()
     if not note or not note.cluster_id:
         return None
@@ -562,7 +611,7 @@ async def get_cluster_context(
     sibling_ids = [mid for mid in member_ids if mid != note_id]
 
     siblings_result = await db.execute(
-        select(Note).where(Note.id.in_(sibling_ids))
+        select(Note).where(Note.id.in_(sibling_ids)).where(vis)
     )
     siblings = [_note_summary(n) for n in siblings_result.scalars().all()]
 
@@ -581,9 +630,10 @@ async def get_cluster_context(
 async def find_by_cluster(
     db: AsyncSession,
     cluster_id: int,
+    is_admin: bool = True,
 ) -> list[dict]:
     """Return all notes in a given cluster."""
     result = await db.execute(
-        select(Note).where(Note.cluster_id == cluster_id)
+        select(Note).where(Note.cluster_id == cluster_id).where(_vis(is_admin))
     )
     return [_note_summary(n) for n in result.scalars().all()]

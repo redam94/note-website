@@ -26,3 +26,4 @@ class Note(Base):
     space_id = Column(
         Integer, ForeignKey("spaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
     )
+    visibility = Column(Text, nullable=False, default="public")

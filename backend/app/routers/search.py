@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import require_user_with_key
+from ..auth import AuthUser, get_current_user, note_visibility_filter, require_user_with_key
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.note import Note
@@ -28,17 +28,20 @@ async def search_notes(
     q: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
     limit: int = Query(default=20, ge=1, le=200),
 ) -> list[SearchResult]:
     """Keyword search — fast, no LLM."""
     if not q:
         return []
 
+    vis = note_visibility_filter(user.is_admin)
     pattern = f"%{q}%"
     result = await db.execute(
         select(Note)
         .where(Note.space_id == current_space.id)
         .where(or_(Note.title.like(pattern), Note.content.like(pattern)))
+        .where(vis)
         .limit(limit)
     )
     rows = result.scalars().all()
@@ -95,7 +98,7 @@ async def search_notes(
         missing_ids = matched_cluster_ids - existing_ids
         if missing_ids:
             extra = await db.execute(
-                select(Note).where(Note.id.in_(missing_ids)).limit(10)
+                select(Note).where(Note.id.in_(missing_ids)).where(vis).limit(10)
             )
             for n in extra.scalars().all():
                 tags = _parse_tags(n.tags)
@@ -120,9 +123,13 @@ async def enhanced_search(
     q: str = Query(...),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
 ) -> SmartSearchResponse:
     """Graph-powered search without LLM — available to all users."""
     from ..services.graph_search import find_by_tag, find_by_cluster, find_related, grep_notes, list_all_tags
+
+    is_admin = user.is_admin
+    vis = note_visibility_filter(is_admin)
 
     # Tokenize query
     stop_words = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of", "and", "or", "with", "how", "what", "why", "when", "does", "can", "should"}
@@ -136,7 +143,7 @@ async def enhanced_search(
     note_data: dict[int, dict] = {}
 
     for term in terms[:5]:
-        matches = await grep_notes(db, term, limit=10, space_id=current_space.id)
+        matches = await grep_notes(db, term, limit=10, space_id=current_space.id, is_admin=is_admin)
         for m in matches:
             nid = m["id"]
             note_data[nid] = m
@@ -144,7 +151,7 @@ async def enhanced_search(
             scored[nid] = scored.get(nid, 0) + pts
 
     # 2. Tag search — check if any term matches a known tag
-    all_tags = await list_all_tags(db, space_id=current_space.id)
+    all_tags = await list_all_tags(db, space_id=current_space.id, is_admin=is_admin)
     tag_names = {t["tag"].lower(): t["tag"] for t in all_tags}
     matched_tags = []
     for term in terms:
@@ -154,7 +161,7 @@ async def enhanced_search(
                 break
 
     for tag in matched_tags[:3]:
-        tag_results = await find_by_tag(db, tag, limit=8, space_id=current_space.id)
+        tag_results = await find_by_tag(db, tag, limit=8, space_id=current_space.id, is_admin=is_admin)
         for r in tag_results:
             nid = r["id"]
             note_data.setdefault(nid, r)
@@ -163,11 +170,11 @@ async def enhanced_search(
     # 2b. Cluster boost — if a note matches, boost its cluster siblings
     boosted_from_cluster: set[int] = set()
     for nid in list(scored.keys())[:5]:
-        note_result = await db.execute(select(Note).where(Note.id == nid))
+        note_result = await db.execute(select(Note).where(Note.id == nid).where(vis))
         note = note_result.scalar_one_or_none()
         if note and note.cluster_id and note.cluster_id not in boosted_from_cluster:
             boosted_from_cluster.add(note.cluster_id)
-            cluster_notes = await find_by_cluster(db, note.cluster_id)
+            cluster_notes = await find_by_cluster(db, note.cluster_id, is_admin=is_admin)
             for cn in cluster_notes:
                 cnid = cn["id"]
                 note_data.setdefault(cnid, cn)
@@ -176,7 +183,7 @@ async def enhanced_search(
     # 3. Graph expansion — find related notes for top 3 results
     top_ids = sorted(scored, key=scored.get, reverse=True)[:3]
     for seed_id in top_ids:
-        related = await find_related(db, seed_id, limit=5, space_id=current_space.id)
+        related = await find_related(db, seed_id, limit=5, space_id=current_space.id, is_admin=is_admin)
         for r in related:
             nid = r["id"]
             note_data.setdefault(nid, r)
@@ -201,7 +208,7 @@ async def enhanced_search(
                 reasons.append(f"title matches '{term}'")
         if not reasons:
             reasons.append("content matches search terms")
-        if nid in [r["id"] for tag in matched_tags[:1] for r in (await find_by_tag(db, tag, limit=20, space_id=current_space.id))]:
+        if nid in [r["id"] for tag in matched_tags[:1] for r in (await find_by_tag(db, tag, limit=20, space_id=current_space.id, is_admin=is_admin))]:
             reasons.append(f"tagged with matching topic")
 
         smart_results.append(SmartSearchResult(
@@ -245,10 +252,14 @@ async def smart_search(
     q: str = Query(...),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
 ) -> SmartSearchResponse:
     """LLM-powered semantic search that understands intent."""
-    # Load all note summaries as a compact catalog
-    result = await db.execute(select(Note).where(Note.space_id == current_space.id))
+    vis = note_visibility_filter(user.is_admin)
+    # Load all note summaries as a compact catalog (visibility-filtered)
+    result = await db.execute(
+        select(Note).where(Note.space_id == current_space.id).where(vis)
+    )
     all_notes = result.scalars().all()
 
     catalog_entries = []
@@ -297,7 +308,7 @@ async def smart_search(
             data = json.loads(response)
     except (json.JSONDecodeError, Exception):
         # Fallback to keyword search
-        keyword_results = await search_notes(q, db, current_space)
+        keyword_results = await search_notes(q, db, current_space, user)
         return SmartSearchResponse(
             query=q,
             interpretation=q,

@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import require_user_with_key
+from ..auth import AuthUser, note_visibility_filter, require_user_with_key
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.graph_edge import GraphEdge
@@ -66,12 +66,15 @@ async def _retrieve(
     db: AsyncSession,
     question: str,
     space_id: int,
+    is_admin: bool = True,
 ) -> tuple[list[Note], list[str]]:
     """Retrieve and rank the most relevant notes for the question.
 
     Returns (ranked_notes, all_titles).
     """
-    all_result = await db.execute(select(Note).where(Note.space_id == space_id))
+    all_result = await db.execute(
+        select(Note).where(Note.space_id == space_id).where(note_visibility_filter(is_admin))
+    )
     all_notes = all_result.scalars().all()
     if not all_notes:
         return [], []
@@ -96,6 +99,7 @@ async def _retrieve(
         question=question,
         note_map=note_map,
         top_k=20,
+        is_admin=is_admin,
     )
     return ranked, all_titles
 
@@ -103,17 +107,20 @@ async def _retrieve(
 # ── Endpoint ──────────────────────────────────────────────────────────
 
 
-@router.post("/chat", dependencies=[Depends(require_user_with_key)])
+@router.post("/chat")
 async def chat_knowledge_base(
     body: ChatRequest,
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(require_user_with_key),
 ):
     if not body.question.strip():
         return StreamingResponse(
             iter(["No question provided."]),
             media_type="text/plain; charset=utf-8",
         )
+
+    is_admin = user.is_admin
 
     async def generate():
         yield f"{_STATUS}Searching knowledge base...\n"
@@ -122,7 +129,7 @@ async def chat_knowledge_base(
         model = await get_setting(db, "model_ask")
 
         # ── Retrieval ─────────────────────────────────────────────────
-        top_notes, all_titles = await _retrieve(db, body.question, current_space.id)
+        top_notes, all_titles = await _retrieve(db, body.question, current_space.id, is_admin=is_admin)
 
         if not top_notes:
             yield f"{_STATUS}No notes found in knowledge base.\n"

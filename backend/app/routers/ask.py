@@ -11,7 +11,7 @@ from slugify import slugify
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import require_user_with_key
+from ..auth import AuthUser, note_visibility_filter, require_user_with_key
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.document import Document
@@ -39,14 +39,18 @@ _STATUS_PREFIX = "<<STATUS>>"
 # ── Ask endpoint ──────────────────────────────────────────────────────
 
 
-@router.post("/ask", dependencies=[Depends(require_user_with_key)])
+@router.post("/ask")
 async def ask_knowledge_base(
     body: AskRequest,
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(require_user_with_key),
 ):
     if not body.question:
         raise HTTPException(status_code=400, detail="No question provided")
+
+    is_admin = user.is_admin
+    vis = note_visibility_filter(is_admin)
 
     async def generate():
         yield f"{_STATUS_PREFIX}Scanning knowledge base...\n"
@@ -55,7 +59,9 @@ async def ask_knowledge_base(
         ask_model = await get_setting(db, "model_ask")
         planner_model = await get_setting(db, "model_outline")
 
-        all_result = await db.execute(select(Note).where(Note.space_id == current_space.id))
+        all_result = await db.execute(
+            select(Note).where(Note.space_id == current_space.id).where(vis)
+        )
         all_notes = all_result.scalars().all()
 
         if not all_notes:
@@ -117,6 +123,7 @@ async def ask_knowledge_base(
             question=body.question,
             note_map=note_map,
             top_k=15,
+            is_admin=is_admin,
         )
 
         source_titles = [n.title for n in relevant_notes[:5]]

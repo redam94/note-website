@@ -35,6 +35,7 @@ async def execute_retrieval(
     question: str,
     note_map: dict[int, Note],
     top_k: int = 15,
+    is_admin: bool = True,
 ) -> list[Note]:
     """Execute graph-search retrieval and return ranked notes.
 
@@ -45,13 +46,16 @@ async def execute_retrieval(
         relevant_tags: tag names to boost (from planner or inferred)
         seed_ids: note IDs to start graph expansion from
         question: original question (used for fallback keyword extraction)
-        note_map: pre-loaded {id: Note} mapping for the space
+        note_map: pre-loaded {id: Note} mapping for the space (caller is
+            responsible for already filtering this by visibility when is_admin=False)
         top_k: how many notes to return
+        is_admin: when False, admin-only notes are hidden from all graph-search
+            sub-queries
     """
     collected_ids: set[int] = set()
 
     # 1. Parallel grep for each search term
-    grep_tasks = [grep_notes(db, term, limit=8, space_id=space_id) for term in search_terms[:4]]
+    grep_tasks = [grep_notes(db, term, limit=8, space_id=space_id, is_admin=is_admin) for term in search_terms[:4]]
     grep_results = await asyncio.gather(*grep_tasks, return_exceptions=True)
     for r in grep_results:
         if isinstance(r, list):
@@ -59,7 +63,7 @@ async def execute_retrieval(
                 collected_ids.add(item["id"])
 
     # 2. Parallel tag search
-    tag_tasks = [find_by_tag(db, tag, limit=6, space_id=space_id) for tag in relevant_tags[:3]]
+    tag_tasks = [find_by_tag(db, tag, limit=6, space_id=space_id, is_admin=is_admin) for tag in relevant_tags[:3]]
     tag_results = await asyncio.gather(*tag_tasks, return_exceptions=True)
     for r in tag_results:
         if isinstance(r, list):
@@ -70,7 +74,7 @@ async def execute_retrieval(
     for sid in seed_ids[:3]:
         if sid in note_map:
             collected_ids.add(sid)
-    nbr_tasks = [get_neighbors(db, sid, direction="both") for sid in seed_ids[:3] if sid in note_map]
+    nbr_tasks = [get_neighbors(db, sid, direction="both", is_admin=is_admin) for sid in seed_ids[:3] if sid in note_map]
     nbr_results = await asyncio.gather(*nbr_tasks, return_exceptions=True)
     for r in nbr_results:
         if isinstance(r, dict) and "neighbors" in r:
@@ -78,7 +82,7 @@ async def execute_retrieval(
                 collected_ids.add(nbr["id"])
 
     # 4. Related notes for top seeds
-    rel_tasks = [find_related(db, sid, limit=5) for sid in seed_ids[:2] if sid in note_map]
+    rel_tasks = [find_related(db, sid, limit=5, is_admin=is_admin) for sid in seed_ids[:2] if sid in note_map]
     rel_results = await asyncio.gather(*rel_tasks, return_exceptions=True)
     for r in rel_results:
         if isinstance(r, list):
@@ -88,14 +92,18 @@ async def execute_retrieval(
     # 5. LIKE fallback if too few results
     if len(collected_ids) < 5:
         fallback_terms = [w for w in question.lower().split() if len(w) > 3][:3]
+        fallback_vis = Note.visibility == "public" if not is_admin else None
         for term in fallback_terms:
             like = f"%{term}%"
-            fb = await db.execute(
+            fb_query = (
                 select(Note)
                 .where(Note.space_id == space_id)
                 .where(or_(Note.title.like(like), Note.content.like(like)))
                 .limit(6)
             )
+            if fallback_vis is not None:
+                fb_query = fb_query.where(fallback_vis)
+            fb = await db.execute(fb_query)
             for n in fb.scalars().all():
                 collected_ids.add(n.id)
 

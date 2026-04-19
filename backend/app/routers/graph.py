@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import AuthUser, get_current_user, note_visibility_filter
 from ..database import get_db
 from ..dependencies import get_current_space
 from ..models.graph_edge import GraphEdge
@@ -32,8 +33,9 @@ async def get_graph(
     include_clusters: bool = Query(False),
     include_topics: bool = Query(False),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
 ) -> GraphData:
-    graph = await build_full_graph(db, space_id=current_space.id)
+    graph = await build_full_graph(db, space_id=current_space.id, is_admin=user.is_admin)
 
     edge_list = [
         GraphEdgeData(
@@ -136,15 +138,17 @@ async def get_local_graph(
     note_id: int,
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
 ) -> GraphData:
     """Return only the 1-hop neighborhood of a note (the note + its direct neighbors).
 
     Much cheaper than /graph — avoids scanning all note content; used by the
     per-note sidebar graph so pages don't have to load the entire knowledge base.
     """
-    # Verify the note exists in this space
+    vis = note_visibility_filter(user.is_admin)
+    # Verify the note exists in this space and is visible to the caller
     note_res = await db.execute(
-        select(Note).where(Note.id == note_id, Note.space_id == current_space.id)
+        select(Note).where(Note.id == note_id, Note.space_id == current_space.id).where(vis)
     )
     if not note_res.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Note not found")
@@ -161,26 +165,28 @@ async def get_local_graph(
         neighbor_ids.add(e.source_id)
         neighbor_ids.add(e.target_id)
 
-    # 2. Fetch all notes in the neighborhood
+    # 2. Fetch all notes in the neighborhood (visibility-filtered)
     notes_res = await db.execute(
-        select(Note).where(Note.id.in_(neighbor_ids), Note.space_id == current_space.id)
+        select(Note).where(Note.id.in_(neighbor_ids), Note.space_id == current_space.id).where(vis)
     )
     neighbor_notes = {n.id: n for n in notes_res.scalars().all()}
 
     # 3. Add parent-child edges (parent → note and note → children)
     all_neighbor_ids = set(neighbor_notes.keys())
     children_res = await db.execute(
-        select(Note).where(Note.parent_id == note_id, Note.space_id == current_space.id)
+        select(Note).where(Note.parent_id == note_id, Note.space_id == current_space.id).where(vis)
     )
     for child in children_res.scalars().all():
         all_neighbor_ids.add(child.id)
         neighbor_notes[child.id] = child
 
-    # Also include the note's own parent if present
+    # Also include the note's own parent if present and visible
     focus_note = neighbor_notes.get(note_id)
     if focus_note and focus_note.parent_id:
         parent_res = await db.execute(
-            select(Note).where(Note.id == focus_note.parent_id, Note.space_id == current_space.id)
+            select(Note)
+            .where(Note.id == focus_note.parent_id, Note.space_id == current_space.id)
+            .where(vis)
         )
         parent = parent_res.scalar_one_or_none()
         if parent:

@@ -36,11 +36,17 @@ class FullGraph:
     co_reference: dict[tuple[int, int], int]  # (min_id, max_id) -> count
 
 
-async def build_full_graph(db: AsyncSession, space_id: int | None = None) -> FullGraph:
+async def build_full_graph(
+    db: AsyncSession,
+    space_id: int | None = None,
+    is_admin: bool = True,
+) -> FullGraph:
     """Build the complete graph from all edge sources.
 
     Args:
         space_id: If provided, only include notes from this space.
+        is_admin: When False, hides notes with visibility='admin' and drops
+            any edge whose endpoint isn't in the visible set.
 
     Returns a FullGraph with notes, deduplicated edges, degree map,
     and bidirectional co-reference counts for each node pair.
@@ -48,19 +54,30 @@ async def build_full_graph(db: AsyncSession, space_id: int | None = None) -> Ful
     note_query = select(Note)
     if space_id is not None:
         note_query = note_query.where(Note.space_id == space_id)
+    if not is_admin:
+        note_query = note_query.where(Note.visibility == "public")
     notes_result = await db.execute(note_query)
     all_notes = notes_result.scalars().all()
 
     note_ids = {n.id for n in all_notes}
 
     if space_id is not None:
-        note_ids_subq = select(Note.id).where(Note.space_id == space_id).scalar_subquery()
+        visible_ids_subq = select(Note.id).where(Note.space_id == space_id)
+        if not is_admin:
+            visible_ids_subq = visible_ids_subq.where(Note.visibility == "public")
+        visible_ids_subq = visible_ids_subq.scalar_subquery()
         edge_query = select(GraphEdge).where(
-            GraphEdge.source_id.in_(note_ids_subq),
-            GraphEdge.target_id.in_(note_ids_subq),
+            GraphEdge.source_id.in_(visible_ids_subq),
+            GraphEdge.target_id.in_(visible_ids_subq),
         )
     else:
         edge_query = select(GraphEdge)
+        if not is_admin:
+            visible_ids_subq = select(Note.id).where(Note.visibility == "public").scalar_subquery()
+            edge_query = edge_query.where(
+                GraphEdge.source_id.in_(visible_ids_subq),
+                GraphEdge.target_id.in_(visible_ids_subq),
+            )
     edges_result = await db.execute(edge_query)
     all_edges = edges_result.scalars().all()
 
@@ -78,12 +95,19 @@ async def build_full_graph(db: AsyncSession, space_id: int | None = None) -> Ful
 
     def add_edge(source: int, target: int, relationship: str, confidence: float = 0.8):
         key = (source, target, relationship)
-        if key not in edge_set and source != target:
-            edge_set.add(key)
-            edge_list.append(EdgeTuple(source, target, relationship, confidence))
-            degree_map[source] += 1
-            degree_map[target] += 1
-            _directed_refs[(source, target)] += 1
+        if key in edge_set or source == target:
+            return
+        # Drop edges that point outside the visible set (matters when non-admin
+        # callers receive a subset of notes). DB-sourced edges were pre-filtered
+        # by the subquery above, but parent-child / wikilink / frontmatter edges
+        # are derived in-process and must be checked here.
+        if source not in note_ids or target not in note_ids:
+            return
+        edge_set.add(key)
+        edge_list.append(EdgeTuple(source, target, relationship, confidence))
+        degree_map[source] += 1
+        degree_map[target] += 1
+        _directed_refs[(source, target)] += 1
 
     # 1. DB edges (from cross_link detection)
     # Skip "part_of" from graph_edges — hierarchy is authoritative via parent_id column;

@@ -14,9 +14,11 @@ from typing import Literal
 
 import bcrypt
 import jwt
+import sqlalchemy as sa
 from fastapi import Cookie, Depends, HTTPException, Request
 
 from .config import settings
+from .models.note import Note
 
 _ALGORITHM = "HS256"
 _TOKEN_EXPIRY_HOURS = 72
@@ -99,6 +101,17 @@ async def require_admin(request: Request) -> AuthUser:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def note_visibility_filter(is_admin: bool):
+    """SQL fragment for filtering notes by visibility.
+
+    Admin sees all notes; every other caller sees only notes with
+    visibility='public'. Apply to every select(Note) on reader-reachable paths.
+    """
+    if is_admin:
+        return sa.true()
+    return Note.visibility == "public"
 
 
 async def require_user_with_key(request: Request) -> AuthUser:
