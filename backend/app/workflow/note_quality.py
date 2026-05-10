@@ -9,14 +9,23 @@ from __future__ import annotations
 
 import re
 
-# ── Fenced code block handling ────────────────────────────────────────
+# ── Fenced + inline code handling ────────────────────────────────────
 
 _FENCE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+# Inline code spans — longest run first so ``a`b`` isn't split into single-tick spans.
+_INLINE_CODE = re.compile(r"``[^`]+``|`[^`\n]+`")
 
 
 def _strip_fences(text: str) -> str:
-    """Remove fenced code blocks so they don't interfere with math/punctuation checks."""
+    """Remove fenced code blocks only. Used by structural checks (callouts,
+    truncation) where inline-code content is still meaningful."""
     return _FENCE.sub("", text)
+
+
+def _strip_code(text: str) -> str:
+    """Remove fenced and inline code spans so their contents don't trigger
+    prose-oriented checks (e.g. a `$` in a code signature isn't LaTeX math)."""
+    return _INLINE_CODE.sub("", _FENCE.sub("", text))
 
 
 # ── Individual linters ────────────────────────────────────────────────
@@ -24,7 +33,7 @@ def _strip_fences(text: str) -> str:
 
 def _unbalanced_display_math(text: str) -> str | None:
     """Flag odd number of `$$` delimiters."""
-    stripped = _strip_fences(text)
+    stripped = _strip_code(text)
     count = stripped.count("$$")
     if count % 2 == 1:
         return f"unbalanced display math ({count} `$$` delimiters)"
@@ -33,7 +42,7 @@ def _unbalanced_display_math(text: str) -> str | None:
 
 def _unbalanced_inline_math(text: str) -> str | None:
     """Flag any line with an odd number of single `$` (after removing `$$` pairs)."""
-    stripped = _strip_fences(text)
+    stripped = _strip_code(text)
     for lineno, line in enumerate(stripped.split("\n"), 1):
         without_dd = line.replace("$$", "")
         if without_dd.count("$") % 2 == 1:

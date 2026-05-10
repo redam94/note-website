@@ -208,11 +208,111 @@ Two prompt changes so generated notes are publish-friendly from the start (not j
 
 ---
 
+## Phase 9 — Code ingest (source files → LLM-generated notes)
+
+Treat a repo's source files as documents and run them through the existing
+note-generation pipeline. One file → one `Document` row → however many notes
+the pipeline produces for that concept (usually one, sometimes more for
+multi-class files). The resulting notes are eligible for Phase 8 wiki publish,
+so the full flow becomes: **track repo → sync code → admin reviews → publish to wiki**.
+
+Option B from the planning discussion (LLM-processed) at file-level granularity.
+
+### 9a — Clone the main repo
+
+- `https://x-access-token:{token}@github.com/{owner}/{repo}.git`, shallow clone
+  on first sync, `fetch + reset --hard origin/{default_branch}` afterwards.
+- Cache path: `uploads_dir/github-code/{resource_id}/`.
+- Token from the existing installation flow; same `Contents: read` permission
+  the wiki ingest already requires.
+
+### 9b — File selection
+
+Config lives in `integration_resources.config_json` next to the other flags:
+
+```json
+{
+  "code_enabled": true,
+  "code_extraction_profile_id": 3,
+  "code_include_exts": ["py", "ts"],
+  "code_max_file_bytes": 200000,
+  "code_max_files": 500,
+  "code_hashes": {"src/foo.py": "sha256:...", ...}
+}
+```
+
+v1 filters: extension whitelist + per-file size cap + total-file cap.
+Glob include/exclude DSL deferred — hardcoded defaults skip obvious noise
+(`.git/`, `node_modules/`, `__pycache__/`, lockfiles).
+
+### 9c — Per-file processing
+
+For each included file:
+
+1. Compute sha256 of contents.
+2. If hash matches `code_hashes[path]`, skip.
+3. Upsert a `Document` row with `filename=path`, `original_name=path`,
+   `mime_type=text/x-{ext}`, `content_raw=<bytes>`, `space_id=resource.space_id`.
+4. Resolve extraction profile: prefer `code_extraction_profile_id` from config,
+   otherwise fall back to `_find_matching_profile(filename, space_id)`.
+5. Enqueue the existing `run_processing_pipeline` via `BackgroundTasks`.
+6. Record the new hash.
+
+Files deleted upstream: remove the matching `Document`; note cleanup cascades
+via existing FK.
+
+### 9d — Extraction profiles for code
+
+No new schema — profiles already exist. Admin creates a profile per language
+with `prompt_additions` guiding the LLM toward code-appropriate notes:
+
+> "This is a Python source file. Explain its purpose, list top-level classes
+> and public functions with short descriptions, and cross-link classes to
+> their consumers using `[[ClassName]]` wikilinks."
+
+The existing `create_note.yaml` is unchanged; guidance flows through
+`prompt_additions` per the existing extraction-profile mechanics.
+
+### 9e — Sync dispatcher wiring
+
+`sync_repo` gains a `code_enabled` branch that calls `sync_code`, same pattern
+as `wiki_enabled` → `sync_wiki`. `SyncResult` gains `code_ingested`,
+`code_updated`, `code_skipped`, `code_deleted`.
+
+Unlike issues/PRs, code processing is async — the sync endpoint returns with
+counts of files *queued*; the pipeline completes notes in the background.
+Admin sees them appear in the space over the next few minutes.
+
+### 9f — UI
+
+- `/settings/integrations/[accountId]`: new **Code** checkbox column next to
+  Issues/PRs/Wiki. When enabled, shows a profile dropdown populated from
+  `/api/extraction-profiles`.
+- Admin pre-creates language-specific extraction profiles under
+  `/settings/extraction` (existing page) before enabling code sync on a repo.
+
+### 9g — Safety / limits
+
+- Skip any file larger than `code_max_file_bytes` (default 200KB).
+- Skip once `code_max_files` reached in a single run (default 500).
+- Ignore `.git/`, `node_modules/`, `__pycache__/`, `dist/`, `build/`, `*.lock`.
+- `visibility='admin'` default on generated notes — admin reviews before
+  publishing to wiki.
+
+**Ships**: tick "Code" on a repo, pick a profile, click Sync. After the
+pipeline finishes, the space fills with explanatory notes about each source
+file. Flip interesting ones to public, run Phase 8 publish, done — the wiki
+mirrors the codebase.
+
+---
+
 ## Deferred (not in this plan)
 
-- GitHub Projects v2 (GraphQL-only; shape differs). Candidate Phase 9.
+- GitHub Projects v2 (GraphQL-only; shape differs).
 - Commits as graph nodes (high volume, low signal by default).
 - Write-back from notes → GitHub issues/PRs (read first, write only once trust is established).
+- AST-aware code chunking (one note per class/function instead of per file).
+- Include/exclude glob DSL for code sync (v1 uses extension whitelist).
 - Gmail / Drive / Docs / Calendar specifics — separate plan once GitHub 0–3 have landed and the foundation is validated.
 
 ---

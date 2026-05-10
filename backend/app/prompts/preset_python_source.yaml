@@ -1,0 +1,47 @@
+section_order:
+  - role
+  - structure_rules
+  - linking_rules
+  - note_shape
+
+sections:
+  role:
+    template: >-
+      This document is a Python source file from a code repository. The
+      "structural overview" header at the top (module docstring, imports,
+      public API signatures) was generated mechanically from the AST and is
+      authoritative — use it to plan notes BEFORE reading the full source
+      that follows. The goal is to turn this file into a small set of
+      densely-cross-linked notes, not a single dump.
+
+  structure_rules:
+    template: |-
+      Code preservation:
+
+      - Preserve every code excerpt verbatim inside fenced ```python ... ``` blocks.
+      - Preserve full type signatures, decorators, and docstrings — never paraphrase, shorten, or "tidy" them.
+      - Never invent code, parameters, or return types that are not in the source. If something is unclear, say so explicitly.
+      - When quoting a function or class in a note, include the complete body unless the note is purely about its public signature.
+      - Module-level constants stay in a single fenced block; do not split them into prose.
+
+  linking_rules:
+    template: |-
+      Connecting code across the repo:
+
+      - Every non-stdlib import name (including local relative imports) must appear as a [[wiki-link]] the first time it is mentioned in prose.
+      - Local relative imports (e.g. `from .foo import bar`) point to other notes generated from this same repo — link them eagerly with [[bar]] / [[foo.bar]].
+      - When a class subclasses, or a function calls, something defined elsewhere in the repo, surface that with `depends_on` (this note depends on the [[other concept]]).
+      - When the structural header lists multiple public classes / functions in one file, plan separate notes for each AND include `depends_on` between them where the source actually wires them together.
+      - For test files (the header marks these explicitly): the note's purpose is to document the **expected behaviour** of the symbol under test, not the test scaffolding. Link to the [[code under test]] via `depends_on`; tag with `type/example`.
+
+  note_shape:
+    template: |-
+      Note shape:
+
+      - One note per public class or top-level function — not one note per file, and not one note per private helper.
+      - The note's title is the symbol name (e.g., `MyClass` or `do_thing`), not the file name.
+      - The module docstring + module-level constants together become a single "<filename> — Overview" note that links to each per-symbol note via `depends_on`.
+      - The prose explains WHY the symbol exists and HOW it is meant to be used, drawing on the docstring and call sites; do not restate WHAT the code obviously does.
+      - Use `> [!example]` callouts for runnable usage drawn from the docstring or from a corresponding test file — never invent example calls.
+      - If the file is a script (no public symbols, just top-level code), produce a single note describing what running the script does, with the entry-point block as a `> [!example]` callout.
+      - Tag library code with `type/concept`; tag scripts and CLI entry points with `type/tutorial`.

@@ -9,6 +9,8 @@ from .subgraph_edge import SubgraphEdge
 from .extraction_profile import ExtractionProfile
 from .connected_account import ConnectedAccount
 from .integration_resource import IntegrationResource
+from .integration_publish_target import IntegrationPublishTarget
+from .note_visibility_change import NoteVisibilityChange
 from .base import Base
 
-__all__ = ["Base", "Document", "Note", "NoteComment", "GraphEdge", "Settings", "Space", "SubgraphNode", "SubgraphEdge", "ExtractionProfile", "ConnectedAccount", "IntegrationResource"]
+__all__ = ["Base", "Document", "Note", "NoteComment", "GraphEdge", "Settings", "Space", "SubgraphNode", "SubgraphEdge", "ExtractionProfile", "ConnectedAccount", "IntegrationResource", "IntegrationPublishTarget", "NoteVisibilityChange"]

@@ -23,10 +23,37 @@ REPO_NAME="${REPO_NAME:-second-brain}"
 BUCKET_NAME="${BUCKET_NAME:-${PROJECT_ID}-second-brain-data}"
 DOMAIN="${DOMAIN:-}"
 
-# Required secrets
-: "${ADMIN_PASSWORD:?ADMIN_PASSWORD not set in .env.live}"
-: "${JWT_SECRET:?JWT_SECRET not set in .env.live}"
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+
+# ── Secret Manager references ────────────────────────────────────────
+# All sensitive values live as secrets, not as plaintext env vars. The
+# secrets must exist in the project before the first deploy. One-time setup:
+#
+#   printf '%s' "$YOUR_PASSWORD" | gcloud secrets create admin-password \
+#     --replication-policy=automatic --data-file=- --project=$PROJECT_ID
+#   printf '%s' "$YOUR_JWT_SECRET" | gcloud secrets create jwt-secret \
+#     --replication-policy=automatic --data-file=- --project=$PROJECT_ID
+#   gcloud secrets create github-app-private-key \
+#     --replication-policy=automatic --data-file=/path/to/app.pem --project=$PROJECT_ID
+#   printf '%s' "$YOUR_WEBHOOK_SECRET" | gcloud secrets create github-webhook-secret \
+#     --replication-policy=automatic --data-file=- --project=$PROJECT_ID
+#
+# Then grant the runtime SA access to each:
+#   gcloud secrets add-iam-policy-binding <secret> \
+#     --member="serviceAccount:$(gcloud projects describe $PROJECT_ID \
+#       --format='value(projectNumber)')-compute@developer.gserviceaccount.com" \
+#     --role=roles/secretmanager.secretAccessor --project=$PROJECT_ID
+#
+# To rotate: `gcloud secrets versions add <secret> --data-file=-` (new value
+# on stdin). Cloud Run picks it up on the next revision.
+ADMIN_PASSWORD_SECRET="${ADMIN_PASSWORD_SECRET:-admin-password}"
+JWT_SECRET_SECRET="${JWT_SECRET_SECRET:-jwt-secret}"
+GITHUB_APP_PRIVATE_KEY_SECRET="${GITHUB_APP_PRIVATE_KEY_SECRET:-github-app-private-key}"
+GITHUB_WEBHOOK_SECRET_SECRET="${GITHUB_WEBHOOK_SECRET_SECRET:-github-webhook-secret}"
+
+# GitHub App integration (optional — install/callback 503 until all three are set)
+GITHUB_APP_ID="${GITHUB_APP_ID:-}"
+GITHUB_APP_SLUG="${GITHUB_APP_SLUG:-}"
 
 echo "=== Deploying Second Brain to GCP Cloud Run ==="
 echo "Project: $PROJECT_ID | Region: $REGION | Service: $SERVICE_NAME"
@@ -89,12 +116,13 @@ gcloud run deploy $SERVICE_NAME \
   --cpu 2 \
   --timeout 300 \
   --min-instances 1 \
-  --max-instances 3 \
+  --max-instances 1 \
   --execution-environment gen2 \
   --add-volume name=data-vol,type=cloud-storage,bucket=$BUCKET_NAME \
   --add-volume-mount volume=data-vol,mount-path=/data \
   --port 3000 \
-  --set-env-vars "ADMIN_PASSWORD=$ADMIN_PASSWORD,JWT_SECRET=$JWT_SECRET,DATABASE_URL=/data/knowledge.db,UPLOADS_DIR=/data/uploads,USE_REDIS=false,CORS_ORIGINS=[\"*\"]"
+  --set-env-vars "DATABASE_URL=/data/knowledge.db,UPLOADS_DIR=/data/uploads,USE_REDIS=false,CORS_ORIGINS=[\"*\"]${GITHUB_APP_ID:+,GITHUB_APP_ID=$GITHUB_APP_ID}${GITHUB_APP_SLUG:+,GITHUB_APP_SLUG=$GITHUB_APP_SLUG}" \
+  --update-secrets "ADMIN_PASSWORD=${ADMIN_PASSWORD_SECRET}:latest,JWT_SECRET=${JWT_SECRET_SECRET}:latest${GITHUB_APP_ID:+,GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY_SECRET}:latest,GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET_SECRET}:latest}"
 
 SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
   --region $REGION --project $PROJECT_ID \

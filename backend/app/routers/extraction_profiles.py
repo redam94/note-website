@@ -8,7 +8,7 @@ import tempfile
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,9 +48,12 @@ class ProfileOut(BaseModel):
     prompt_additions: str
     created_at: str
     space_id: int
+    space_name: str | None = None
 
     @classmethod
-    def from_row(cls, row: ExtractionProfile) -> "ProfileOut":
+    def from_row(
+        cls, row: ExtractionProfile, space_name: str | None = None
+    ) -> "ProfileOut":
         return cls(
             id=row.id,
             name=row.name,
@@ -62,6 +65,7 @@ class ProfileOut(BaseModel):
             prompt_additions=row.prompt_additions or "",
             created_at=row.created_at,
             space_id=row.space_id,
+            space_name=space_name,
         )
 
 
@@ -89,13 +93,30 @@ def _get_profile_or_404(row: ExtractionProfile | None) -> ExtractionProfile:
 
 @router.get("", dependencies=[Depends(require_admin)])
 async def list_profiles(
+    all: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
 ) -> list[ProfileOut]:
+    """List extraction profiles. Defaults to the current space; pass
+    `?all=true` to list every installed profile across all spaces (admin
+    contexts that span spaces, e.g. configuring repo-sync targets, need
+    this — see `_resolve_profile_for_file` in github.code).
+    """
+    if all:
+        rows = (
+            await db.execute(
+                select(ExtractionProfile, Space.name).join(
+                    Space, Space.id == ExtractionProfile.space_id
+                )
+            )
+        ).all()
+        return [ProfileOut.from_row(profile, space_name) for profile, space_name in rows]
     result = await db.execute(
         select(ExtractionProfile).where(ExtractionProfile.space_id == current_space.id)
     )
-    return [ProfileOut.from_row(r) for r in result.scalars().all()]
+    return [
+        ProfileOut.from_row(r, current_space.name) for r in result.scalars().all()
+    ]
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_admin)])

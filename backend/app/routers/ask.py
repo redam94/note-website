@@ -223,7 +223,11 @@ async def save_answer(
         slug = f"{slug_base}-{counter}"
         counter += 1
 
-    tags = ["type/qa"] + [f"topic/{t}" for t in body.tags if t]
+    tags = [
+        "source/ingested",
+        "source/question",
+        "type/qa",
+    ] + [f"topic/{t}" for t in body.tags if t]
     now = datetime.now(timezone.utc)
 
     frontmatter_lines = ["---", f'title: "{title}"', "tags:"]

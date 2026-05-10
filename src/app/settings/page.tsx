@@ -268,6 +268,63 @@ export default function SettingsPage() {
           </div>
         </section>
 
+        {/* Integrations */}
+        <section className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-1">Integrations</h2>
+              <p className="text-[13px] text-[var(--text-secondary)]">
+                Link GitHub accounts once. Connections live globally; each vault
+                picks which repos to ingest separately.
+              </p>
+            </div>
+            <Link
+              href="/settings/integrations"
+              className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium border border-[var(--border)] rounded-lg text-[var(--text-secondary)] hover:border-[var(--accent-light)] hover:text-[var(--accent)] transition-all"
+            >
+              Manage →
+            </Link>
+          </div>
+        </section>
+
+        {/* Vault repos */}
+        <section className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-1">Vault repos</h2>
+              <p className="text-[13px] text-[var(--text-secondary)]">
+                Per-vault: track GitHub repos that stream issues, PRs, wiki
+                pages, and source files into the current vault as notes.
+              </p>
+            </div>
+            <Link
+              href="/settings/repos"
+              className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium border border-[var(--border)] rounded-lg text-[var(--text-secondary)] hover:border-[var(--accent-light)] hover:text-[var(--accent)] transition-all"
+            >
+              Manage →
+            </Link>
+          </div>
+        </section>
+
+        {/* Publish */}
+        <section className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[16px] font-semibold text-[var(--heading)] mb-1">Publish</h2>
+              <p className="text-[13px] text-[var(--text-secondary)]">
+                Push a space&apos;s public notes to a GitHub repo&apos;s wiki. Admin-only notes are never
+                included.
+              </p>
+            </div>
+            <Link
+              href="/settings/publish"
+              className="flex-shrink-0 px-3 py-1.5 text-[12px] font-medium border border-[var(--border)] rounded-lg text-[var(--text-secondary)] hover:border-[var(--accent-light)] hover:text-[var(--accent)] transition-all"
+            >
+              Manage →
+            </Link>
+          </div>
+        </section>
+
       </div>
     </div>
   );

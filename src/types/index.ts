@@ -54,6 +54,7 @@ export interface NoteWithLinks {
   chapter?: string | null;
   page?: number | null;
   summary?: string | null;
+  visibility: "public" | "admin";
   backlinks: Array<{ id: number; title: string; slug: string; relationship: string }>;
   outlinks: Array<{ id: number; title: string; slug: string; relationship: string }>;
 }

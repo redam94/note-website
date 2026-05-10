@@ -37,6 +37,7 @@ async def run_processing_pipeline(
     original_name: str,
     space_id: int = 1,
     extraction_profile_id: int | None = None,
+    code_repo: str | None = None,
 ):
     """Run the pipeline with checkpoint resumption."""
 
@@ -77,6 +78,7 @@ async def run_processing_pipeline(
             "extraction_profile_id": extraction_profile_id,
             "doc_type_override": None,
             "prompt_additions": "",
+            "code_repo": code_repo,
             "error": None,
         }
         last_node = None

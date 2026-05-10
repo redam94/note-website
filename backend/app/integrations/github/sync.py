@@ -25,9 +25,12 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastapi import BackgroundTasks
+
 from ...models.integration_resource import IntegrationResource
 from ...models.note import Note
 from .auth import get_installation_token
+from .code import sync_code
 from .wiki import sync_wiki
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,11 @@ class SyncResult:
     wiki_updated: int = 0
     wiki_skipped: int = 0
     wiki_deleted: int = 0
+    code_ingested: int = 0
+    code_updated: int = 0
+    code_skipped: int = 0
+    code_skipped_too_large: int = 0
+    code_deleted: int = 0
     errors: list[str] = field(default_factory=list)
     cursor: str | None = None
     synced_at: str | None = None
@@ -64,6 +72,11 @@ class SyncResult:
             "wiki_updated": self.wiki_updated,
             "wiki_skipped": self.wiki_skipped,
             "wiki_deleted": self.wiki_deleted,
+            "code_ingested": self.code_ingested,
+            "code_updated": self.code_updated,
+            "code_skipped": self.code_skipped,
+            "code_skipped_too_large": self.code_skipped_too_large,
+            "code_deleted": self.code_deleted,
             "errors": self.errors,
             "cursor": self.cursor,
             "synced_at": self.synced_at,
@@ -264,6 +277,7 @@ async def sync_repo(
     installation_id: int,
     *,
     dry_run: bool = False,
+    background_tasks: BackgroundTasks | None = None,
 ) -> SyncResult:
     """Incremental sync of issues + PRs for a tracked repo."""
     result = SyncResult(resource_id=resource.id)
@@ -335,10 +349,12 @@ async def sync_repo(
     if dry_run:
         result.issues_ingested = len(issues_items)
         result.prs_ingested = len(prs_items)
-        # Wiki dry-run is skipped — it would require a clone, which is what
+        # Wiki/code dry-run is skipped — both require clones, which is what
         # we're trying to avoid in a preview. Flag explicitly.
         if cfg.get("wiki_enabled", False):
             result.errors.append("dry-run does not preview wiki changes")
+        if cfg.get("code_enabled", False):
+            result.errors.append("dry-run does not preview code changes")
         result.synced_at = datetime.now(timezone.utc).isoformat()
         return result
 
@@ -403,8 +419,7 @@ async def sync_repo(
     resource.last_synced_at = now_iso
     await db.commit()
 
-    # Wiki sync runs last. Its change-detection is independent of the
-    # issue/PR cursor (content-hash based), so cursor concerns don't apply.
+    # Wiki sync — content-hash change detection, independent of issue cursor.
     if cfg.get("wiki_enabled", False):
         try:
             wiki_result = await sync_wiki(db, resource, installation_id)
@@ -418,6 +433,26 @@ async def sync_repo(
             result.wiki_deleted = wiki_result.deleted
             result.errors.extend(wiki_result.errors)
             await db.commit()
+
+    # Code sync — creates Documents and kicks off the note-generation pipeline
+    # in the background. Counts here represent files *queued*, not notes
+    # already materialized; admin watches /api/documents for progress.
+    if cfg.get("code_enabled", False):
+        try:
+            code_result = await sync_code(
+                db, resource, installation_id, background_tasks=background_tasks
+            )
+        except Exception as e:
+            logger.exception("code sync raised for resource %d", resource.id)
+            result.errors.append(f"code: {e}")
+        else:
+            result.code_ingested = code_result.ingested
+            result.code_updated = code_result.updated
+            result.code_skipped = code_result.skipped
+            result.code_skipped_too_large = code_result.skipped_too_large
+            result.code_deleted = code_result.deleted
+            result.errors.extend(code_result.errors)
+            # sync_code commits on its own; nothing extra here
 
     result.cursor = resource.sync_cursor
     result.synced_at = now_iso

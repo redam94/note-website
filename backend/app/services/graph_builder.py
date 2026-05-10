@@ -157,6 +157,107 @@ async def build_full_graph(
                 if used_id:
                     add_edge(used_id, note.id, "depends_on", 0.9)
 
+    # 5. GitHub issue / PR cross-references
+    # Build (repo, number) → note_id lookup from GitHub-sourced notes so we
+    # can resolve `#N` and `owner/repo#N` references in note content.
+    _GH_REPO_IN_FM = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
+    _GH_NUMBER_IN_FM = re.compile(r"^number:\s*(\d+)\s*$", re.MULTILINE)
+
+    gh_ref_lookup: dict[tuple[str, int], int] = {}
+    for note in all_notes:
+        if not (note.source or "").startswith("github:"):
+            continue
+        content = note.content or ""
+        fm_match = re.match(r"^---\n([\s\S]*?)\n---", content)
+        if not fm_match:
+            continue
+        fm = fm_match.group(1)
+        repo_m = _GH_REPO_IN_FM.search(fm)
+        num_m = _GH_NUMBER_IN_FM.search(fm)
+        if repo_m and num_m:
+            try:
+                gh_ref_lookup[(repo_m.group(1).strip(), int(num_m.group(1)))] = note.id
+            except ValueError:
+                continue
+
+    if gh_ref_lookup:
+        # Compiled once outside the loop
+        _GH_TYPED = re.compile(
+            r"\b(closes|fixes|resolves|close|fix|resolve|closed|fixed|resolved)"
+            r"\s+(?:([A-Za-z0-9._-]+/[A-Za-z0-9._-]+))?#(\d+)\b",
+            re.IGNORECASE,
+        )
+        _GH_QUALIFIED = re.compile(r"\b([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)\b")
+        _GH_BARE = re.compile(r"(?:^|[\s(\[,])#(\d+)\b")
+
+        for note in all_notes:
+            content = note.content or ""
+            # Strip frontmatter before scanning so own-frontmatter fields
+            # (title, html_url) don't create self-references.
+            body = content
+            fm_match = re.match(r"^---\n([\s\S]*?)\n---\n?", content)
+            if fm_match:
+                body = content[fm_match.end():]
+
+            # Repo context for bare `#N` resolution — a note carries context
+            # only if it *is* a GitHub note with a repo frontmatter field.
+            my_repo: str | None = None
+            if fm_match and (note.source or "").startswith("github:"):
+                repo_m = _GH_REPO_IN_FM.search(fm_match.group(1))
+                if repo_m:
+                    my_repo = repo_m.group(1).strip()
+
+            # Pass 1 — typed closing refs
+            typed_pairs: set[tuple[int, int]] = set()
+            for m in _GH_TYPED.finditer(body):
+                qualified_repo = m.group(2)
+                try:
+                    number = int(m.group(3))
+                except ValueError:
+                    continue
+                repo = qualified_repo or my_repo
+                if not repo:
+                    continue
+                target_id = gh_ref_lookup.get((repo, number))
+                if target_id and target_id != note.id:
+                    add_edge(note.id, target_id, "closes", 0.9)
+                    typed_pairs.add((note.id, target_id))
+
+            # Pass 2 — qualified refs (owner/repo#N without closing verb)
+            qualified_hits: set[tuple[int, int, int]] = set()
+            for m in _GH_QUALIFIED.finditer(body):
+                qualified_hits.add((m.start(), m.end(), int(m.group(2))))
+                try:
+                    number = int(m.group(2))
+                except ValueError:
+                    continue
+                target_id = gh_ref_lookup.get((m.group(1), number))
+                if not target_id or target_id == note.id:
+                    continue
+                if (note.id, target_id) in typed_pairs:
+                    continue
+                add_edge(note.id, target_id, "references", 0.7)
+
+            # Pass 3 — bare `#N` (only within a repo-context note). Skip any
+            # `#N` that was already consumed by a qualified `owner/repo#N`
+            # match so we don't double-count.
+            if my_repo:
+                consumed_spans = {(s, e) for s, e, _ in qualified_hits}
+                for m in _GH_BARE.finditer(body):
+                    # Was this `#N` the tail of an already-matched qualified ref?
+                    if any(s <= m.start() + 1 and m.end() <= e for s, e in consumed_spans):
+                        continue
+                    try:
+                        number = int(m.group(1))
+                    except ValueError:
+                        continue
+                    target_id = gh_ref_lookup.get((my_repo, number))
+                    if not target_id or target_id == note.id:
+                        continue
+                    if (note.id, target_id) in typed_pairs:
+                        continue
+                    add_edge(note.id, target_id, "references", 0.6)
+
     # Compute bidirectional co-reference: for each pair (A,B), sum A->B + B->A
     co_reference: dict[tuple[int, int], int] = {}
     seen_pairs: set[tuple[int, int]] = set()

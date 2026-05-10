@@ -19,6 +19,7 @@ from ..models.document import Document
 from ..models.graph_edge import GraphEdge
 from ..models.note import Note
 from ..models.note_comment import NoteComment
+from ..models.note_visibility_change import NoteVisibilityChange
 from ..models.space import Space
 from ..prompts import load_prompt
 from ..schemas.note import LinkInfo, NoteWithLinks
@@ -278,12 +279,34 @@ class NoteVisibilityUpdate(BaseModel):
     visibility: str  # "public" | "admin"
 
 
+def _log_visibility_change(
+    db: AsyncSession,
+    note: Note,
+    from_val: str,
+    to_val: str,
+    actor: AuthUser,
+) -> None:
+    """Record an audit row when visibility actually changes. Does NOT commit."""
+    if from_val == to_val:
+        return
+    db.add(
+        NoteVisibilityChange(
+            note_id=note.id,
+            from_visibility=from_val,
+            to_visibility=to_val,
+            actor=actor.role,
+            changed_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+
+
 @router.patch("/notes/{slug}/visibility", dependencies=[Depends(require_admin)])
 async def update_note_visibility(
     slug: str,
     body: NoteVisibilityUpdate,
     db: AsyncSession = Depends(get_db),
     current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
 ):
     if body.visibility not in ("public", "admin"):
         raise HTTPException(status_code=400, detail="visibility must be 'public' or 'admin'")
@@ -295,9 +318,107 @@ async def update_note_visibility(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
+    old = note.visibility
     note.visibility = body.visibility
+    _log_visibility_change(db, note, old, body.visibility, user)
     await db.commit()
     return {"slug": note.slug, "visibility": note.visibility}
+
+
+class BulkVisibilityUpdate(BaseModel):
+    slugs: list[str]
+    visibility: str  # "public" | "admin"
+
+
+@router.post("/notes/visibility/bulk", dependencies=[Depends(require_admin)])
+async def bulk_update_visibility(
+    body: BulkVisibilityUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+    user: AuthUser = Depends(get_current_user),
+):
+    """Flip visibility on a batch of notes at once.
+
+    Matches only notes inside the current space — cross-space bulk edits are
+    intentionally not supported. Missing slugs are reported but don't fail
+    the whole call.
+    """
+    if body.visibility not in ("public", "admin"):
+        raise HTTPException(status_code=400, detail="visibility must be 'public' or 'admin'")
+    if not body.slugs:
+        return {"updated": 0, "not_found": []}
+    # Dedupe slugs so a caller passing the same slug twice only counts once
+    wanted = list(dict.fromkeys(body.slugs))
+
+    result = await db.execute(
+        select(Note).where(
+            Note.slug.in_(wanted),
+            Note.space_id == current_space.id,
+        )
+    )
+    found = {n.slug: n for n in result.scalars().all()}
+    updated = 0
+    for slug in wanted:
+        note = found.get(slug)
+        if note is None:
+            continue
+        old = note.visibility
+        if old != body.visibility:
+            note.visibility = body.visibility
+            _log_visibility_change(db, note, old, body.visibility, user)
+            updated += 1
+    await db.commit()
+
+    not_found = [s for s in wanted if s not in found]
+    return {"updated": updated, "not_found": not_found}
+
+
+class VisibilityChangeOut(BaseModel):
+    id: int
+    noteId: int
+    slug: str
+    title: str
+    fromVisibility: str
+    toVisibility: str
+    actor: str
+    changedAt: str
+
+
+@router.get("/notes/visibility/history", dependencies=[Depends(require_admin)])
+async def get_visibility_history(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_space: Space = Depends(get_current_space),
+) -> list[VisibilityChangeOut]:
+    """Most recent visibility changes for notes in the current space.
+
+    Bounded to the current space so the audit log respects space isolation;
+    changes to notes in other spaces are not visible here.
+    """
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+    q = (
+        select(NoteVisibilityChange, Note)
+        .join(Note, Note.id == NoteVisibilityChange.note_id)
+        .where(Note.space_id == current_space.id)
+        .order_by(NoteVisibilityChange.changed_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(q)).all()
+    return [
+        VisibilityChangeOut(
+            id=change.id,
+            noteId=change.note_id,
+            slug=note.slug,
+            title=note.title,
+            fromVisibility=change.from_visibility,
+            toVisibility=change.to_visibility,
+            actor=change.actor,
+            changedAt=change.changed_at,
+        )
+        for change, note in rows
+    ]
 
 
 @router.patch("/notes/{slug}/parent", dependencies=[Depends(require_admin)])

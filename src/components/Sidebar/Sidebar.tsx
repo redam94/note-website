@@ -13,7 +13,15 @@ interface TreeNode {
   title: string;
   slug: string;
   level: number;
+  tags: string[];
   children: TreeNode[];
+}
+
+function provenanceLabel(tag: string): string {
+  if (tag === "source/upload") return "Uploaded";
+  if (tag === "source/question") return "Questions";
+  if (tag.startsWith("source/github-code/")) return tag.slice("source/github-code/".length);
+  return tag.slice("source/".length) || tag;
 }
 
 // Global refresh trigger — other components can call window.dispatchEvent(new Event("sidebar-refresh"))
@@ -23,6 +31,8 @@ export default function Sidebar() {
   const [searchQuery, setSearchQuery] = useState("");
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [provenanceFilter, setProvenanceFilter] = useState<string | null>(null);
+  const [showProvenance, setShowProvenance] = useState(true);
   const pathname = usePathname();
   const prevPathRef = useRef(pathname);
   const pathnameRef = useRef(pathname);
@@ -51,7 +61,7 @@ export default function Sidebar() {
 
       const nodeMap = new Map<number, TreeNode>();
       for (const n of nodes) {
-        nodeMap.set(n.id, { ...n, children: [] });
+        nodeMap.set(n.id, { ...n, tags: n.tags || [], children: [] });
       }
 
       const childIds = new Set<number>();
@@ -222,6 +232,23 @@ export default function Sidebar() {
     return result;
   }
   const flatNodes = flattenTree(tree);
+
+  // Collect distinct provenance tags (source/* except source/ingested, which is
+  // always present and carries no signal). Counts drive the "n" badge.
+  const provenanceCounts = new Map<string, number>();
+  for (const n of flatNodes) {
+    for (const tag of n.tags) {
+      if (!tag.startsWith("source/") || tag === "source/ingested") continue;
+      provenanceCounts.set(tag, (provenanceCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  const provenanceTags = Array.from(provenanceCounts.keys()).sort();
+
+  const filteredNotes = provenanceFilter
+    ? flatNodes
+        .filter((n) => n.tags.includes(provenanceFilter))
+        .sort((a, b) => a.title.localeCompare(b.title))
+    : null;
 
   async function handleCreateNote(e: React.FormEvent) {
     e.preventDefault();
@@ -462,11 +489,57 @@ export default function Sidebar() {
         </Link>
       </div>
 
+      {/* Source filter (provenance) */}
+      {provenanceTags.length > 0 && (
+        <div className="px-1 pt-1">
+          <button
+            onClick={() => setShowProvenance((v) => !v)}
+            className="w-full px-2 py-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)] hover:text-[var(--text-secondary)] transition-colors"
+          >
+            <span>Source</span>
+            <span className="text-[10px]">{showProvenance ? "▾" : "▸"}</span>
+          </button>
+          {showProvenance && (
+            <ul className="pb-2">
+              <li>
+                <button
+                  onClick={() => setProvenanceFilter(null)}
+                  className={`w-full text-left flex items-center gap-1 py-[3px] pl-3 pr-2 rounded transition-colors text-[12.5px] ${
+                    provenanceFilter === null
+                      ? "bg-[var(--accent-bg-hover)] text-[var(--accent)]"
+                      : "text-[var(--text-secondary)] hover:text-[var(--text)] hover:bg-[var(--surface2)]"
+                  }`}
+                >
+                  <span className="flex-1 truncate">All sources</span>
+                  <span className="text-[10px] text-[var(--muted)]">{flatNodes.length}</span>
+                </button>
+              </li>
+              {provenanceTags.map((tag) => (
+                <li key={tag}>
+                  <button
+                    onClick={() => setProvenanceFilter(tag)}
+                    className={`w-full text-left flex items-center gap-1 py-[3px] pl-3 pr-2 rounded transition-colors text-[12.5px] ${
+                      provenanceFilter === tag
+                        ? "bg-[var(--accent-bg-hover)] text-[var(--accent)]"
+                        : "text-[var(--text-secondary)] hover:text-[var(--text)] hover:bg-[var(--surface2)]"
+                    }`}
+                    title={tag}
+                  >
+                    <span className="flex-1 truncate">{provenanceLabel(tag)}</span>
+                    <span className="text-[10px] text-[var(--muted)]">{provenanceCounts.get(tag)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {/* Explorer */}
       <div className="flex-1 overflow-y-auto px-1">
         <div className="px-2 py-1.5 flex items-center justify-between">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-            Explorer
+            {filteredNotes ? provenanceLabel(provenanceFilter!) : "Explorer"}
           </span>
           <div className="flex gap-1">
             {isAdmin && (
@@ -541,7 +614,34 @@ export default function Sidebar() {
           </form>
         )}
 
-        {tree.length === 0 ? (
+        {filteredNotes ? (
+          filteredNotes.length === 0 ? (
+            <p className="text-[12px] text-[var(--muted)] px-3 py-4">
+              No notes for this source.
+            </p>
+          ) : (
+            <ul className="pb-4">
+              {filteredNotes.map((n) => {
+                const isActive = pathname === `/notes/${n.slug}`;
+                return (
+                  <li key={n.id}>
+                    <Link
+                      href={`/notes/${n.slug}`}
+                      className={`flex items-center gap-1 py-[3px] pl-3 pr-2 rounded transition-colors text-[12.5px] ${
+                        isActive
+                          ? "bg-[var(--accent-bg-hover)] text-[var(--accent)]"
+                          : "text-[var(--text-secondary)] hover:text-[var(--text)] hover:bg-[var(--surface2)]"
+                      }`}
+                      title={n.title}
+                    >
+                      <span className="truncate flex-1">{shortenTitle(n.title)}</span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )
+        ) : tree.length === 0 ? (
           <p className="text-[12px] text-[var(--muted)] px-3 py-4">No notes yet.</p>
         ) : (
           <ul className="pb-4">{tree.map((n) => renderTreeNode(n))}</ul>

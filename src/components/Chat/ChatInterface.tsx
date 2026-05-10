@@ -1,7 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useMemo } from "react";
+import Link from "next/link";
 import { useChat } from "@/contexts/ChatContext";
+import { useSpace } from "@/contexts/SpaceContext";
+import { apiUrl } from "@/lib/api";
 import ChatMessage from "./ChatMessage";
 import ResearchGraph from "./ResearchGraph";
 
@@ -16,9 +19,17 @@ function extractFollowUps(content: string): string[] {
   return questions.slice(0, 4);
 }
 
+type SavedState =
+  | { status: "idle" }
+  | { status: "saving" }
+  | { status: "saved"; slug: string; title: string }
+  | { status: "error"; message: string };
+
 export default function ChatInterface() {
   const { messages, isStreaming, graphData, sendMessage, clearConversation } = useChat();
+  const { spaceSlug } = useSpace();
   const [input, setInput] = useState("");
+  const [saved, setSaved] = useState<SavedState>({ status: "idle" });
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
 
@@ -56,12 +67,48 @@ export default function ChatInterface() {
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
-  const lastAssistant   = [...messages].reverse().find((m) => m.role === "assistant");
+  const lastAssistantIdx = [...messages].map((m, i) => [m, i] as const).reverse().find(([m]) => m.role === "assistant")?.[1];
+  const lastAssistant = lastAssistantIdx != null ? messages[lastAssistantIdx] : undefined;
+  const lastUserQuestion = useMemo(() => {
+    if (lastAssistantIdx == null) return "";
+    for (let i = lastAssistantIdx - 1; i >= 0; i--) {
+      if (messages[i].role === "user") return messages[i].content;
+    }
+    return "";
+  }, [messages, lastAssistantIdx]);
   const followUps       = lastAssistant && !lastAssistant.isStreaming
     ? extractFollowUps(lastAssistant.content)
     : [];
   const panelSources    = lastAssistant?.sources ?? [];
   const panelStatusMsgs = lastAssistant?.statusMessages ?? [];
+
+  // Reset save state whenever the last assistant message changes (new turn)
+  useEffect(() => {
+    setSaved({ status: "idle" });
+  }, [lastAssistantIdx, lastAssistant?.content]);
+
+  async function handleSaveAnswer() {
+    if (!lastAssistant || lastAssistant.isStreaming || !lastUserQuestion) return;
+    if (saved.status === "saving" || saved.status === "saved") return;
+    setSaved({ status: "saving" });
+    try {
+      const res = await fetch(apiUrl("/api/ask/save", spaceSlug), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: lastUserQuestion,
+          answer: lastAssistant.content,
+          tags: [],
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSaved({ status: "saved", slug: data.slug, title: data.title });
+      window.dispatchEvent(new Event("sidebar-refresh"));
+    } catch (e) {
+      setSaved({ status: "error", message: e instanceof Error ? e.message : "Save failed" });
+    }
+  }
 
   // All note IDs that have appeared as sources across the whole conversation
   const allHighlightedIds = useMemo(() => {
@@ -149,6 +196,37 @@ export default function ChatInterface() {
               {messages.map((msg, i) => (
                 <ChatMessage key={i} message={msg} />
               ))}
+
+              {/* Save-as-note action */}
+              {lastAssistant && !lastAssistant.isStreaming && lastAssistant.content.trim() && lastUserQuestion && (
+                <div className="mt-2 mb-3 flex items-center gap-3">
+                  {saved.status === "saved" ? (
+                    <Link
+                      href={`/notes/${saved.slug}`}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md border border-[var(--accent-light)] bg-[var(--accent-bg)] text-[var(--accent)] hover:opacity-90 transition-all"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Saved — open note
+                    </Link>
+                  ) : (
+                    <button
+                      onClick={handleSaveAnswer}
+                      disabled={saved.status === "saving"}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--surface2)] hover:border-[var(--accent-light)] hover:text-[var(--text)] disabled:opacity-40 transition-all"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M14 3v5h5" />
+                      </svg>
+                      {saved.status === "saving" ? "Saving..." : "Save as note"}
+                    </button>
+                  )}
+                  {saved.status === "error" && (
+                    <span className="text-[11px] text-[var(--danger)]">{saved.message}</span>
+                  )}
+                </div>
+              )}
 
               {/* Follow-up chips */}
               {followUps.length > 0 && !isStreaming && (

@@ -94,6 +94,10 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   const [moveSearch, setMoveSearch] = useState("");
   const [moving, setMoving] = useState(false);
 
+  // Visibility toggle state
+  const [visibilitySaving, setVisibilitySaving] = useState(false);
+  const [visibilityError, setVisibilityError] = useState<string | null>(null);
+
   const router = useRouter();
   const { role } = useAuth();
   const { spaceSlug } = useSpace();
@@ -126,6 +130,29 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
   const fmTags = useMemo(() => (note ? extractFrontmatterTags(note.content) : []), [note]);
   const docType = useMemo(() => (note ? extractDocType(note.content) : null), [note]);
   const readTime = useMemo(() => (note ? estimateReadTime(note.content) : 0), [note]);
+
+  async function handleToggleVisibility() {
+    if (!note) return;
+    const next = note.visibility === "admin" ? "public" : "admin";
+    setVisibilitySaving(true);
+    setVisibilityError(null);
+    try {
+      const res = await fetch(apiUrl(`/api/notes/${slug}/visibility`, spaceSlug), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ visibility: next }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      setNote({ ...note, visibility: next });
+    } catch (e) {
+      setVisibilityError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVisibilitySaving(false);
+    }
+  }
 
   async function handleDelete() {
     if (!confirmDelete) { setConfirmDelete(true); return; }
@@ -340,6 +367,36 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
             <div className="flex-shrink-0 mt-1 flex items-center gap-1">
               {isAdmin && (
                 <>
+                  {/* Visibility toggle */}
+                  <button
+                    onClick={handleToggleVisibility}
+                    disabled={visibilitySaving}
+                    className={
+                      "inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded border transition-colors disabled:opacity-50 disabled:cursor-not-allowed " +
+                      (note.visibility === "admin"
+                        ? "bg-[var(--surface2)] text-[var(--callout-amber)] border-[var(--border)] hover:bg-[var(--border)]"
+                        : "bg-[var(--surface2)] text-[var(--callout-green)] border-[var(--border)] hover:bg-[var(--border)]")
+                    }
+                    title={note.visibility === "admin"
+                      ? "Admin-only — click to publish"
+                      : "Public — click to make admin-only"}
+                  >
+                    {note.visibility === "admin" ? (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        </svg>
+                        Private
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        Public
+                      </>
+                    )}
+                  </button>
                   {/* Edit button */}
                   <button
                     onClick={startEditing}
@@ -415,6 +472,12 @@ export default function NoteViewer({ slug }: NoteViewerProps) {
                 <span key={tag} className="tag-pill">#{tag}</span>
               ))}
             </div>
+          )}
+
+          {visibilityError && (
+            <p className="mt-2 text-[12px] text-[var(--danger)]">
+              Visibility change failed: {visibilityError}
+            </p>
           )}
         </div>
 

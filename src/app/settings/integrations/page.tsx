@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import { useAuth } from "@/components/AuthProvider";
+import { useSpace } from "@/contexts/SpaceContext";
 
 interface ConnectedAccount {
   id: number;
@@ -32,6 +33,8 @@ function ConnectedBanner() {
 }
 
 function IntegrationsBody() {
+  const { spaceSlug, spaces } = useSpace();
+  const currentSpace = spaces.find((s) => s.slug === spaceSlug) ?? null;
   const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -89,7 +92,12 @@ function IntegrationsBody() {
           <div>
             <h2 className="text-[16px] font-semibold text-[var(--heading)]">GitHub</h2>
             <p className="text-[13px] text-[var(--text-secondary)] mt-1">
-              Link a GitHub account so issues, PRs, and wikis from selected repos appear as notes.
+              Link a GitHub account once here; pick which repos to ingest into
+              each vault from{" "}
+              <Link href="/settings/repos" className="underline">
+                Vault repos
+              </Link>
+              {currentSpace ? ` (currently: ${currentSpace.name})` : ""}.
             </p>
           </div>
           <a href="/api/integrations/github/install" className={btnPrimary}>
@@ -116,12 +124,6 @@ function IntegrationsBody() {
                     ) : null}
                   </div>
                 </div>
-                <Link
-                  href={`/settings/integrations/${acc.id}`}
-                  className="px-3 py-1.5 text-[13px] bg-[var(--surface2)] text-[var(--text)] rounded border border-[var(--border)] hover:bg-[var(--border)] transition-colors"
-                >
-                  Manage repos
-                </Link>
                 <button onClick={() => handleDisconnect(acc.id)} className={btnDanger}>
                   Disconnect
                 </button>

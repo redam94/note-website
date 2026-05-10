@@ -6,8 +6,16 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
 import "katex/dist/katex.min.css";
+import "highlight.js/styles/github-dark.css";
 import PlotlyChart from "./PlotlyChart";
+
+// rehype-highlight options: keep adding hljs classes for unknown languages
+// (so our callout/plotly detection in `pre` still sees the original
+// `language-X` class). `detect: false` skips auto-detect on code fences
+// with no language specified — avoids misclassifying plain text.
+const highlightOptions = { detect: false, ignoreMissing: true };
 
 // ── Callout metadata ────────────────────────────────────────────────
 
@@ -181,7 +189,7 @@ export default function NoteContent({ content, className }: NoteContentProps) {
               <div className="callout-title">{block.icon} {block.label}</div>
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex]}
+                rehypePlugins={[rehypeKatex, [rehypeHighlight, highlightOptions]]}
                 components={mdComponents}
               >
                 {block.body}
@@ -193,7 +201,7 @@ export default function NoteContent({ content, className }: NoteContentProps) {
           <ReactMarkdown
             key={idx}
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
+            rehypePlugins={[rehypeKatex, [rehypeHighlight, highlightOptions]]}
             components={mdComponents}
           >
             {block.content}

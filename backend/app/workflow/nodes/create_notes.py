@@ -274,6 +274,18 @@ def _get_section_text(
 # ── Frontmatter builder ──────────────────────────────────────────────
 
 
+def _provenance_tag(code_repo: str | None) -> str:
+    """Return the source/* tag for this note's provenance.
+
+    `code_repo` is set when the document came from a GitHub code ingest
+    (value is `owner/name`). Slashes are converted to `-` so the tag stays
+    a single segment after `source/github-code/`.
+    """
+    if code_repo:
+        return "source/github-code/" + code_repo.replace("/", "-")
+    return "source/upload"
+
+
 def _build_frontmatter(
     title: str,
     tags: list[str],
@@ -285,6 +297,8 @@ def _build_frontmatter(
     used_by: list[str],
     doc_type: str = "concept",
     aliases: list[str] | None = None,
+    code_file: str | None = None,
+    code_repo: str | None = None,
 ) -> str:
     lines = ["---"]
     lines.append(f'title: "{title}"')
@@ -294,11 +308,16 @@ def _build_frontmatter(
             lines.append(f'  - "{alias}"')
     lines.append("tags:")
     lines.append("  - source/ingested")
+    lines.append(f"  - {_provenance_tag(code_repo)}")
     for tag in tags:
         sanitized = tag.lower().replace(" ", "-")
         lines.append(f"  - topic/{sanitized}")
     lines.append(f"  - type/{doc_type}")
     lines.append(f'source: "{source}"')
+    if code_file:
+        lines.append(f'code_file: "{code_file}"')
+    if code_repo:
+        lines.append(f'code_repo: "{code_repo}"')
     if source_location:
         lines.append(f'source_location: "{source_location}"')
     if chapter:
@@ -611,6 +630,7 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             source_location = ""
         folder = plan_entry.get("folder", "")
 
+        code_repo = state.get("code_repo")
         frontmatter = _build_frontmatter(
             title=plan_entry["title"],
             tags=tags,
@@ -622,6 +642,8 @@ async def create_notes(state: ProcessingState) -> ProcessingState:
             used_by=used_by,
             doc_type=doc_type,
             aliases=note_output.aliases or [],
+            code_file=original_name if code_repo else None,
+            code_repo=code_repo,
         )
 
         assembled = note_output.assemble_markdown()

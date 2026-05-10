@@ -111,10 +111,10 @@ export default function LocalGraph({
 
     const simulation = d3
       .forceSimulation(nodes)
-      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(50))
-      .force("charge", d3.forceManyBody().strength(-100))
+      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(75))
+      .force("charge", d3.forceManyBody().strength(-220).distanceMax(250))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(18));
+      .force("collision", d3.forceCollide().radius(24).strength(0.9));
 
     g.append("g")
       .selectAll("line")
@@ -130,9 +130,9 @@ export default function LocalGraph({
       .data(nodes)
       .join("circle")
       .attr("r", (d) => {
-        if (d.id === focusNodeId) return 5.5;
-        if (isTopicNode(d)) return Math.max(4, Math.min(10, 4 + Math.sqrt(d.degree) * 1.5));
-        return 3.5;
+        if (d.id === focusNodeId) return 7;
+        if (isTopicNode(d)) return Math.max(4, Math.min(14, 4 + Math.sqrt(d.degree) * 2));
+        return Math.max(2.5, Math.min(9, 2.5 + Math.sqrt(d.degree) * 1.6));
       })
       .attr("fill", (d) => {
         if (d.id === focusNodeId) return "#6b7c3f";

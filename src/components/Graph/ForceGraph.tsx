@@ -174,9 +174,9 @@ export default function ForceGraph({
 
     // Node radius helper
     function nodeRadius(d: SimNode): number {
-      if (d.nodeType === "subgraph") return Math.max(6, Math.min(14, 6 + d.degree * 0.25));
-      if (isTopicNode(d)) return Math.max(4, Math.min(16, 4 + Math.sqrt(d.degree) * 2.2));
-      return Math.max(1.8, Math.min(7, 1.8 + Math.sqrt(d.degree) * 1.4));
+      if (d.nodeType === "subgraph") return Math.max(7, Math.min(22, 7 + d.degree * 0.45));
+      if (isTopicNode(d)) return Math.max(5, Math.min(26, 5 + Math.sqrt(d.degree) * 3.2));
+      return Math.max(2.5, Math.min(14, 2.5 + Math.sqrt(d.degree) * 2.4));
     }
 
     // ── Join links (key by source+target+rel) ─────────────────────────
@@ -286,10 +286,10 @@ export default function ForceGraph({
     const simulation = d3
       .forceSimulation(nodes)
       .alpha(startAlpha)
-      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(60).strength(0.15))
-      .force("charge", d3.forceManyBody().strength(-40).distanceMax(300))
-      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.03))
-      .force("collision", d3.forceCollide().radius((d: any) => nodeRadius(d) + 2).strength(0.4))
+      .force("link", d3.forceLink(links).id((d: any) => d.id).distance(110).strength(0.12))
+      .force("charge", d3.forceManyBody().strength(-180).distanceMax(500))
+      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.02))
+      .force("collision", d3.forceCollide().radius((d: any) => nodeRadius(d) + 10).strength(0.8))
       .alphaDecay(0.015);
 
     simRef.current = simulation;

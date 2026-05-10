@@ -48,5 +48,8 @@ class ProcessingState(TypedDict):
     doc_type_override: str | None
     # Extra instructions injected into the LLM system prompt during note creation
     prompt_additions: str
+    # Provenance: set when the document came from a GitHub *code* ingest.
+    # Value is the repo's `owner/name`; original_name already carries the repo-relative path.
+    code_repo: str | None
     # Error tracking
     error: str | None
